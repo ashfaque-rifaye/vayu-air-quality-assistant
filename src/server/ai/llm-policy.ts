@@ -12,6 +12,7 @@ export interface LlmEnv {
   GEMINI_API_KEY?: string | undefined;
   GEMINI_MODEL?: string | undefined;
   GEMINI_FALLBACK_MODEL?: string | undefined;
+  GEMINI_RESERVE_MODEL?: string | undefined;
   FIREWORKS_API_KEY?: string | undefined;
   FIREWORKS_MODEL?: string | undefined;
   FIREWORKS_FALLBACK_MODEL?: string | undefined;
@@ -23,6 +24,9 @@ export interface LlmEnv {
 // returns 429, where an alias such as gemini-flash-lite-latest did not.
 export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 const DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
+// A larger model from a separate capacity pool, tried last. When both lite models
+// were answering 503 under load (measured November 2026), this one still answered.
+const DEFAULT_GEMINI_RESERVE_MODEL = "gemini-3.5-flash";
 const DEFAULT_FIREWORKS_MODEL = "accounts/fireworks/models/gpt-oss-120b";
 const DEFAULT_FIREWORKS_FALLBACK_MODEL = "accounts/fireworks/models/glm-5p2";
 
@@ -45,17 +49,27 @@ export function isProviderFatalStatus(status: number): boolean {
   return status === 400 || status === 401 || status === 403;
 }
 
+/**
+ * Statuses that mean "busy, try again shortly": the same model is worth one more
+ * attempt after a brief pause before moving down the chain. 429 is not here: it
+ * means quota is spent, and a pause of a second will not refill it.
+ */
+export function isTransientStatus(status: number): boolean {
+  return status === 500 || status === 502 || status === 503 || status === 504;
+}
+
 /** Ordered, de-duplicated model chain for a provider. */
 export function modelChain(provider: LlmProvider, env: LlmEnv): string[] {
-  const [primary, fallback] =
+  const chain =
     provider === "gemini"
       ? [
           env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL,
           env.GEMINI_FALLBACK_MODEL?.trim() || DEFAULT_GEMINI_FALLBACK_MODEL,
+          env.GEMINI_RESERVE_MODEL?.trim() || DEFAULT_GEMINI_RESERVE_MODEL,
         ]
       : [
           env.FIREWORKS_MODEL?.trim() || DEFAULT_FIREWORKS_MODEL,
           env.FIREWORKS_FALLBACK_MODEL?.trim() || DEFAULT_FIREWORKS_FALLBACK_MODEL,
         ];
-  return [...new Set([primary, fallback])];
+  return [...new Set(chain)];
 }

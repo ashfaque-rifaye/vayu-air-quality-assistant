@@ -44,6 +44,12 @@ describe("App routing", () => {
     expect(sent).not.toContain("Dadi");
   });
 
+  it("moves focus to the main content from the skip link", () => {
+    render(<App store={createPlanStore(memoryStorage())} />);
+    screen.getByRole("link", { name: /skip to main content/i }).click();
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+  });
+
   it("explains when a plan id is unknown", async () => {
     render(<App store={createPlanStore(memoryStorage())} />);
     go(planHref("does-not-exist"));

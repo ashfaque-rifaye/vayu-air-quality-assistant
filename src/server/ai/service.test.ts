@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildPlanContext } from "../../shared/plan-context.js";
+import { AI_FEATURE_NAMES, aiContracts, type AiFeatureName } from "../../shared/contracts.js";
+import { buildAirContext, buildPlanContext, profileForAi } from "../../shared/plan-context.js";
 import { makePlan, TODAY } from "../../test/fixtures.js";
 import { createAiService, InvalidInputError } from "./service.js";
 import type { LlmClient } from "./llm.js";
@@ -96,6 +97,50 @@ describe("the AI pipeline", () => {
     const result = await service(llm).run("interpret", { text: "we live in Delhi" }, "k");
     expect(result.envelope.source).toBe("fallback");
     expect(result.envelope.fallbackReason).toBe("provider-error");
+  });
+
+  it("gives every feature a contract-valid offline answer when the model is down", async () => {
+    const plan = makePlan();
+    const profile = profileForAi(plan.profile);
+    const air = buildAirContext(plan.air);
+    const context = buildPlanContext(plan, TODAY);
+    const inputs: { [F in AiFeatureName]: unknown } = {
+      interpret: { text: "A family of four in Delhi near a main road" },
+      personalize: { profile, air },
+      swaps: { profile, air },
+      review: { context },
+      measure: { profile, air, measureLabel: "HEPA purifier", category: "purifier" },
+      daysheet: { profile, air, wakeTime: "06:30" },
+      chat: { context, message: "What should I do first today?" },
+    };
+    const down: LlmClient = {
+      configured: true,
+      complete: async () => {
+        throw new Error("HTTP 503");
+      },
+    };
+    const svc = service(down);
+    for (const feature of AI_FEATURE_NAMES) {
+      const { envelope } = await svc.run(feature, inputs[feature], `k-${feature}`);
+      expect(envelope, feature).toMatchObject({
+        source: "fallback",
+        fallbackReason: "provider-error",
+      });
+      expect(aiContracts[feature].output.safeParse(envelope.data).success, feature).toBe(true);
+    }
+  });
+
+  it("logs which models failed, without the request text", async () => {
+    const log = vi.fn();
+    const down: LlmClient = {
+      configured: true,
+      complete: async () => {
+        throw new Error("gemini/x: HTTP 503");
+      },
+    };
+    await service(down, { log }).run("interpret", { text: "my private address" }, "k");
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("HTTP 503"));
+    expect(String(log.mock.calls[0]?.[0])).not.toContain("private address");
   });
 
   it("rejects invalid input before any model call", async () => {

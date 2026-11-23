@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApp, clientKey } from "./app.js";
 import { InvalidInputError, type AiService } from "./ai/service.js";
 
@@ -115,5 +115,47 @@ describe("the HTTP surface", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ fields: ["text"] });
+  });
+
+  it("hides the details of an unexpected failure from the response", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const broken = appWith((async () => {
+      throw new Error("secret internal detail");
+    }) as unknown as AiService["run"]);
+    const res = await broken.request("/api/ai/interpret", {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ text: "Delhi" }),
+    });
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    expect(body).not.toContain("secret internal detail");
+    expect(error).toHaveBeenCalledWith("[app] Error");
+    error.mockRestore();
+  });
+
+  it("refuses a malformed Origin header as cross-origin", async () => {
+    const res = await okAi.request("http://localhost/api/ai/interpret", {
+      method: "POST",
+      headers: { ...json, origin: "not a url", host: "localhost" },
+      body: JSON.stringify({ text: "Delhi" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("accepts a same-origin browser request", async () => {
+    const res = await okAi.request("http://localhost/api/ai/interpret", {
+      method: "POST",
+      headers: { ...json, origin: "http://localhost", host: "localhost" },
+      body: JSON.stringify({ text: "Delhi" }),
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("clientKey edge cases", () => {
+  it("falls back to the nearest entry when fewer proxies appended than trusted", () => {
+    expect(clientKey("9.9.9.9", 3)).toBe("9.9.9.9");
+    expect(clientKey(" , ", 1)).toBe("direct");
   });
 });

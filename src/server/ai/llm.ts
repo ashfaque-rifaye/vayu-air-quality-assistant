@@ -1,8 +1,9 @@
 /**
- * LLM client with two-level failover.
+ * LLM client with layered failover.
  *
  *   provider chain   Gemini -> Fireworks        (different credentials and quota)
- *     model chain    primary -> fallback model  (same provider, different model)
+ *     model chain    primary -> fallback -> reserve (same provider, different model)
+ *       retry        one short, jittered retry of a model that answered 5xx (busy)
  *
  * The `parse` callback runs inside the chain, so output that fails schema
  * validation counts as a failed attempt and moves on to the next model, rather
@@ -15,6 +16,7 @@
 import {
   configuredProviders,
   isProviderFatalStatus,
+  isTransientStatus,
   modelChain,
   type LlmEnv,
   type LlmProvider,
@@ -52,10 +54,19 @@ export interface LlmClientOptions {
   attemptTimeoutMs?: number;
   /** Ceiling across all attempts, so the user is never left waiting. */
   totalTimeoutMs?: number;
+  /** Pause before retrying a model that answered "busy" (5xx). */
+  retryDelayMs?: number;
 }
 
-const DEFAULT_ATTEMPT_TIMEOUT_MS = 12_000;
+/** A busy-server failure: the same model is worth one more try. */
+class TransientError extends Error {}
+
+const DEFAULT_ATTEMPT_TIMEOUT_MS = 10_000;
 const DEFAULT_TOTAL_TIMEOUT_MS = 25_000;
+const DEFAULT_RETRY_DELAY_MS = 400;
+const MAX_TRANSIENT_RETRIES = 1;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 interface ProviderAdapter {
   apiKey(env: LlmEnv): string | undefined;
@@ -121,6 +132,7 @@ export function createLlmClient(env: LlmEnv, options: LlmClientOptions = {}): Ll
   const doFetch = options.fetch ?? fetch;
   const attemptTimeoutMs = options.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
   const totalTimeoutMs = options.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const providers = configuredProviders(env);
 
   async function attempt(
@@ -140,9 +152,8 @@ export function createLlmClient(env: LlmEnv, options: LlmClientOptions = {}): Ll
     if (!response.ok) {
       // The response body is intentionally not logged: providers may echo input.
       const message = `HTTP ${response.status}`;
-      throw isProviderFatalStatus(response.status)
-        ? new ProviderFatalError(message)
-        : new Error(message);
+      if (isProviderFatalStatus(response.status)) throw new ProviderFatalError(message);
+      throw isTransientStatus(response.status) ? new TransientError(message) : new Error(message);
     }
     const text = adapter.readText(await response.json());
     if (!text) throw new Error("empty completion");
@@ -158,16 +169,21 @@ export function createLlmClient(env: LlmEnv, options: LlmClientOptions = {}): Ll
       const deadline = AbortSignal.timeout(totalTimeoutMs);
       const failures: string[] = [];
 
-      for (const provider of providers) {
+      providers: for (const provider of providers) {
         for (const model of modelChain(provider, env)) {
-          if (deadline.aborted) break;
-          try {
-            const signal = AbortSignal.any([deadline, AbortSignal.timeout(attemptTimeoutMs)]);
-            const text = await attempt(provider, model, request, signal);
-            return { value: parse(text), provider, model };
-          } catch (error) {
-            failures.push(`${provider}/${model}: ${describeFailure(error)}`);
-            if (error instanceof ProviderFatalError) break;
+          for (let retry = 0; retry <= MAX_TRANSIENT_RETRIES; retry++) {
+            if (deadline.aborted) break providers;
+            try {
+              const signal = AbortSignal.any([deadline, AbortSignal.timeout(attemptTimeoutMs)]);
+              const text = await attempt(provider, model, request, signal);
+              return { value: parse(text), provider, model };
+            } catch (error) {
+              failures.push(`${provider}/${model}: ${describeFailure(error)}`);
+              if (error instanceof ProviderFatalError) continue providers;
+              if (!(error instanceof TransientError) || retry === MAX_TRANSIENT_RETRIES) break;
+              // A busy model often answers a moment later; jitter spreads out retries.
+              await sleep(retryDelayMs * (1 + Math.random() / 2));
+            }
           }
         }
       }

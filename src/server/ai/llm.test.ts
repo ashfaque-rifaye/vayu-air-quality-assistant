@@ -4,6 +4,7 @@ import {
   configuredProviders,
   DEFAULT_GEMINI_MODEL,
   isProviderFatalStatus,
+  isTransientStatus,
   modelChain,
 } from "./llm-policy.js";
 
@@ -32,9 +33,21 @@ describe("policy", () => {
     expect([404, 408, 429, 500, 503].some(isProviderFatalStatus)).toBe(false);
   });
 
+  it("treats only server-busy statuses as worth a same-model retry", () => {
+    expect([500, 502, 503, 504].every(isTransientStatus)).toBe(true);
+    expect([400, 401, 403, 404, 408, 429].some(isTransientStatus)).toBe(false);
+  });
+
   it("builds a de-duplicated model chain with overrides", () => {
+    expect(modelChain("gemini", {})).toHaveLength(3);
     expect(modelChain("gemini", {})[0]).toBe(DEFAULT_GEMINI_MODEL);
-    expect(modelChain("gemini", { GEMINI_MODEL: "a", GEMINI_FALLBACK_MODEL: "a" })).toEqual(["a"]);
+    expect(
+      modelChain("gemini", {
+        GEMINI_MODEL: "a",
+        GEMINI_FALLBACK_MODEL: "a",
+        GEMINI_RESERVE_MODEL: "a",
+      }),
+    ).toEqual(["a"]);
     expect(
       modelChain("fireworks", { FIREWORKS_MODEL: "x", FIREWORKS_FALLBACK_MODEL: "y" }),
     ).toEqual(["x", "y"]);
@@ -142,12 +155,60 @@ describe("createLlmClient", () => {
 
   it("reports every failure, without echoing content, when all providers fail", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => json({ secret: "user text" }, 500));
-    const client = createLlmClient(ENV, { fetch: fetchMock });
+    const client = createLlmClient(ENV, { fetch: fetchMock, retryDelayMs: 0 });
     const error = await client.complete(REQUEST, passthrough).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(LlmUnavailableError);
     expect((error as Error).message).toContain("HTTP 500");
     expect((error as Error).message).not.toContain("user text");
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // Three Gemini models and two Fireworks models, each tried twice on a 5xx.
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+  });
+
+  it("retries a busy (503) model once before moving down the chain", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(json({}, 503))
+      .mockResolvedValueOnce(geminiOk("same model, second try"));
+    const client = createLlmClient(ENV, { fetch: fetchMock, retryDelayMs: 0 });
+    const result = await client.complete(REQUEST, passthrough);
+    expect(result).toMatchObject({ value: "same model, second try", model: DEFAULT_GEMINI_MODEL });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a busy model only once, then falls to the next model", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(json({}, 503))
+      .mockResolvedValueOnce(json({}, 503))
+      .mockResolvedValueOnce(geminiOk("fallback model"));
+    const client = createLlmClient(ENV, { fetch: fetchMock, retryDelayMs: 0 });
+    const result = await client.complete(REQUEST, passthrough);
+    expect(result.value).toBe("fallback model");
+    expect(result.model).not.toBe(DEFAULT_GEMINI_MODEL);
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls[0]).toBe(urls[1]);
+    expect(urls[2]).not.toBe(urls[1]);
+  });
+
+  it("reaches the reserve model when both lite models are overloaded", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (url) =>
+      String(url).includes("gemini-3.5-flash:") ? geminiOk("reserve") : json({}, 503),
+    );
+    const client = createLlmClient({ GEMINI_API_KEY: "k" }, { fetch: fetchMock, retryDelayMs: 0 });
+    const result = await client.complete(REQUEST, passthrough);
+    expect(result).toMatchObject({ value: "reserve", model: "gemini-3.5-flash" });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not retry the same model on a 429, since quota will not refill in a second", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(json({}, 429))
+      .mockResolvedValueOnce(geminiOk("next"));
+    const client = createLlmClient(ENV, { fetch: fetchMock, retryDelayMs: 0 });
+    await client.complete(REQUEST, passthrough);
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls[0]).not.toBe(urls[1]);
   });
 
   it("names schema failures without echoing what the model said", async () => {

@@ -28,7 +28,8 @@ export default defineConfig({
         "src/server/bootstrap.ts",
         "src/server/static.ts",
       ],
-      thresholds: { lines: 88, statements: 86, functions: 78, branches: 73 },
+      // Enforced in CI, set just under the measured figures so a drop fails the build.
+      thresholds: { lines: 98, statements: 97, functions: 97, branches: 89 },
     },
   },
 });

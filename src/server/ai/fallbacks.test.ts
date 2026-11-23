@@ -146,6 +146,59 @@ describe("interpretFallback reads negation", () => {
   });
 });
 
+describe("the offline planner follows the air and the home", () => {
+  const cleanAir = { ...air, safeToVentilate: true, cleanestFrom: "14:00", cleanestTo: "16:00" };
+  const smokyAir = { ...air, safeToVentilate: false };
+
+  it("schedules airing out only when there is a clean window", () => {
+    const clean = personalizeFallback({ profile, air: cleanAir });
+    expect(clean.routine.some((r) => r.category === "ventilation" && r.time === "14:00")).toBe(
+      true,
+    );
+    const smoky = personalizeFallback({ profile, air: smokyAir });
+    expect(smoky.routine.some((r) => r.category === "ventilation")).toBe(false);
+  });
+
+  it("adds a kitchen-venting reminder for a smoky stove", () => {
+    const wood = makeProfile({ home: { ...profile.home, cookingFuel: "wood" } });
+    const out = personalizeFallback({ profile: wood, air: smokyAir });
+    expect(out.routine.some((r) => r.category === "cooking")).toBe(true);
+    expect(aiContracts.personalize.output.safeParse(out).success).toBe(true);
+  });
+
+  it("writes a day-sheet that matches the day: airing out, commute and exercise", () => {
+    const clean = daysheetFallback({ profile, air: cleanAir, wakeTime: "06:30" });
+    expect(clean.items.map((i) => i.title)).toEqual(
+      expect.arrayContaining(["Air out the home", "Mask up for the commute"]),
+    );
+    const homebody = makeProfile({ commuteMode: "none", outdoorActivity: "none" });
+    const smoky = daysheetFallback({ profile: homebody, air: smokyAir, wakeTime: "06:30" });
+    const titles = smoky.items.map((i) => i.title);
+    expect(titles).toContain("Keep windows shut");
+    expect(titles).not.toContain("Mask up for the commute");
+    expect(titles).not.toContain("Keep hard exercise indoors");
+  });
+
+  it.each([
+    ["Can I go for a run this evening?", /exercise indoors/i],
+    ["Is it safe for my kid to play outside?", /most sensitive member/i],
+    ["hello", /Ask me about/i],
+  ])("chat answers %j on topic", (message, reply) => {
+    const context = buildPlanContext(makePlan(), TODAY);
+    const out = chatFallback(aiContracts.chat.input.parse({ context, message }));
+    expect(out.reply).toMatch(reply);
+  });
+
+  it.each([
+    ["I go to the gym daily", "moderate"],
+    ["We walk in the park", "light"],
+    ["I jog every morning", "intense"],
+  ])("reads activity from %j", (text, level) => {
+    const out = interpretFallback(aiContracts.interpret.input.parse({ text }));
+    expect(out.profile.outdoorActivity).toBe(level);
+  });
+});
+
 describe("householdSize", () => {
   it("reads how many people live there", () => {
     expect(householdSize("We're a family of four in Delhi")).toBe(4);

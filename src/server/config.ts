@@ -19,6 +19,7 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().trim().optional(),
   GEMINI_MODEL: z.string().trim().optional(),
   GEMINI_FALLBACK_MODEL: z.string().trim().optional(),
+  GEMINI_RESERVE_MODEL: z.string().trim().optional(),
   FIREWORKS_API_KEY: z.string().trim().optional(),
   FIREWORKS_MODEL: z.string().trim().optional(),
   FIREWORKS_FALLBACK_MODEL: z.string().trim().optional(),
