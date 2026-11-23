@@ -117,7 +117,7 @@ const interpret: AiFeature<"interpret"> = {
       objective: "Extract the details they actually stated into a structured household profile.",
       rules: [
         "Only fill fields the person stated or clearly implied. Leave every other key out of the JSON entirely: never send an empty string or null for a field you cannot fill. Do not invent a city, a condition, or a home detail.",
-        "members lists each person they mention with a short label and a group: healthy, child (under ~12), senior (65+), respiratory (asthma, COPD, allergies), heart, or pregnant. Use the most protective group that fits.",
+        'members lists each person they mention with a short label and a group: healthy, child (under ~12), senior (65+), respiratory (asthma, COPD, allergies), heart, or pregnant. Use the most protective group that fits. If they give a household size ("a family of four"), list that many members: the people they describe, then generic ones labelled "Adult" (group healthy) so the total matches.',
         "home.ventilation is sealed, average or leaky. home.cookingFuel is induction, lpg, gas, wood or kerosene. home.heating is none, electric, gas or wood. hasPurifier and nearRoad are booleans only when stated.",
         "commuteMode is none, walk, cycle, metro, bus, car or motorbike. outdoorActivity is none, light, moderate or intense. commuteTime and outdoorTime are 24-hour HH:MM when they gave a time (8am is 08:00).",
         "concerns holds up to 3 of: children, elderly, exercise, commute, cooking, sleep, budget, and only when they said it matters.",

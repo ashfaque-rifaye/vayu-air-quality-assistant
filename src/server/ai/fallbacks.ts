@@ -51,6 +51,30 @@ const COMMUTE_RULES: readonly [RegExp, CommuteMode][] = [
   [/\bwalk\w*\b/i, "walk"],
 ];
 
+const NUMBER_WORDS: Readonly<Record<string, number>> = {
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+
+/** "A family of four", "five of us", "a household of 3": how many people live there. */
+export function householdSize(text: string): number | undefined {
+  const match =
+    /\b(?:family|household|home) of (\d{1,2}|two|three|four|five|six|seven|eight|nine|ten)\b|\b(\d{1,2}|two|three|four|five|six|seven|eight|nine|ten) of us\b/i.exec(
+      text,
+    );
+  const word = (match?.[1] ?? match?.[2])?.toLowerCase();
+  if (!word) return undefined;
+  const n = NUMBER_WORDS[word] ?? Number(word);
+  return n >= 1 && n <= 12 ? n : undefined;
+}
+
 /** The first clock time in the text ("8am", "7:30 pm", "18:00") as 24-hour HH:MM. */
 export function parseClockTime(text: string): string | undefined {
   const match = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b/i.exec(text);
@@ -72,9 +96,13 @@ export function interpretFallback(input: AiParsedInput<"interpret">): AiOutput<"
   const city = CITY.exec(text)?.[1];
   if (city) profile.city = city;
 
-  const members = MEMBER_RULES.filter(([pattern]) => pattern.test(text)).map(
-    ([, group, label]) => ({ label, group }),
-  );
+  const members: { label: string; group: SensitivityGroup }[] = MEMBER_RULES.filter(([pattern]) =>
+    pattern.test(text),
+  ).map(([, group, label]) => ({ label, group }));
+  // "A family of four": the people described, then healthy adults up to that size.
+  const size = householdSize(text);
+  while (size && members.length < Math.min(size, 12))
+    members.push({ label: "Adult", group: "healthy" });
   if (members.length > 0) profile.members = members.slice(0, 12);
 
   const fuel = FUEL_RULES.find(([pattern]) => pattern.test(text))?.[1];

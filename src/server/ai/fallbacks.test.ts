@@ -5,6 +5,7 @@ import { makePlan, makeProfile, TODAY } from "../../test/fixtures.js";
 import {
   chatFallback,
   daysheetFallback,
+  householdSize,
   interpretFallback,
   parseClockTime,
   measureFallback,
@@ -142,5 +143,22 @@ describe("interpretFallback reads negation", () => {
 
   it("credits one the household says it has", () => {
     expect(read("We already run an air purifier in the bedroom")).toBe(true);
+  });
+});
+
+describe("householdSize", () => {
+  it("reads how many people live there", () => {
+    expect(householdSize("We're a family of four in Delhi")).toBe(4);
+    expect(householdSize("there are 5 of us")).toBe(5);
+    expect(householdSize("a household of three")).toBe(3);
+    expect(householdSize("just me")).toBeUndefined();
+  });
+
+  it("pads the described people to the stated size", () => {
+    const out = interpretFallback(
+      aiContracts.interpret.input.parse({ text: "A family of four in Delhi. My son has asthma." }),
+    );
+    expect(out.profile.members).toHaveLength(4);
+    expect(out.profile.members?.filter((m) => m.group === "healthy")).toHaveLength(2);
   });
 });

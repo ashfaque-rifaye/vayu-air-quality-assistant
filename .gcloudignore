@@ -1,0 +1,17 @@
+# What `gcloud run deploy --source .` must never upload to Cloud Build.
+# Secrets first: the API key reaches Cloud Run through Secret Manager, not the image.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.gcloudignore
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.claude/
+.vercel/
+video-output/
