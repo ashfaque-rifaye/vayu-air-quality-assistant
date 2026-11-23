@@ -42,3 +42,5 @@ Vayu is a public, unauthenticated app that calls a quota-limited LLM from its se
 ## Secret handling
 
 Never commit `.env`. Use `.env.example` as the template, and set real keys as environment variables on the host. CI fails if a credential-shaped string or a `.env` file is committed.
+
+In production (Google Cloud Run) the key lives in **Secret Manager** and is mounted into the service at runtime; only the service's runtime account can read it. `.gcloudignore` keeps `.env` out of the Cloud Build upload, and `.dockerignore` keeps it out of the image.

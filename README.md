@@ -8,7 +8,7 @@
 ![Coverage](https://img.shields.io/badge/coverage-89%25%20statements-brightgreen)
 ![WCAG](https://img.shields.io/badge/WCAG%20AA-contrast%20tested%20in%20both%20themes-brightgreen)
 
-**Architecture:** [ARCHITECTURE.md](ARCHITECTURE.md) · **Threat model:** [SECURITY.md](SECURITY.md) · **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Demo script:** [docs/DEMO-SCRIPT.md](docs/DEMO-SCRIPT.md)
+**Live demo:** https://vayu-375514827428.asia-south1.run.app (Google Cloud Run, Mumbai) · **Architecture:** [ARCHITECTURE.md](ARCHITECTURE.md) · **Threat model:** [SECURITY.md](SECURITY.md) · **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Demo script:** [docs/DEMO-SCRIPT.md](docs/DEMO-SCRIPT.md)
 
 No login. Describe your home in your own words and you get a plan in seconds. It works with no AI key at all, and says so when it does.
 
@@ -195,6 +195,24 @@ All optional, and all server-side only. See [.env.example](.env.example).
 | `TRUSTED_PROXY_HOPS`                     | `1`                                               | Proxies in front of the app, for client identity |
 
 ### Deploy
+
+**Google Cloud Run (how the live demo runs):** the [`Dockerfile`](Dockerfile) builds in Cloud Build, and the key is read from Secret Manager at runtime, so it is never in the image, the source upload ([`.gcloudignore`](.gcloudignore)) or the environment of a build.
+
+```bash
+# once: store the key (read from stdin, so it never appears in shell history)
+printf '%s' "$GEMINI_API_KEY" | gcloud secrets create gemini-api-key --data-file=-
+gcloud secrets add-iam-policy-binding gemini-api-key \
+  --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --role=roles/secretmanager.secretAccessor
+
+# deploy: scales to zero when idle, at most 2 instances so spend stays bounded
+gcloud run deploy vayu --source . --region asia-south1 --allow-unauthenticated \
+  --set-secrets=GEMINI_API_KEY=gemini-api-key:latest \
+  --set-env-vars=AI_GLOBAL_LIMIT_PER_HOUR=300,TRUSTED_PROXY_HOPS=1 \
+  --min-instances=0 --max-instances=2 --memory=512Mi
+```
+
+Idle cost is zero. A demo's traffic sits well inside Cloud Run's monthly free tier, and the global AI limit caps model spend.
 
 **Vercel:** `vercel --prod`, with `GEMINI_API_KEY` set as a project environment variable. [`vercel.json`](vercel.json) and [`api/index.ts`](api/index.ts) are ready.
 
