@@ -149,9 +149,9 @@ There is no account or database, which removes a whole class of risks (credentia
 | 500, 502, 503, 504 (server busy)                   | Retry the same model once after ~0.4 s with jitter, then try the next model     |
 | 408, 429, 404                                      | Try the next model on the same provider                                         |
 | 400, 401, 403                                      | Skip that provider's other models, which cannot help, and try the next provider |
-| Timeout (10 s per attempt)                         | Try the next model                                                              |
+| Timeout (8 s per attempt)                          | Try the next model                                                              |
 | Invalid JSON, schema failure, or grounding failure | Try the next model                                                              |
-| 25 s overall deadline                              | Stop, and use the offline planner                                               |
+| 15 s overall deadline                              | Stop, and use the offline planner                                               |
 
 The Gemini chain is `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.5-flash`, chosen by measuring models on a free-tier key and changeable through environment variables. Free-tier quota is per model, so each step is a different model with its own quota. A busy 503 often clears within a second, so it earns one same-model retry; a 429 means quota is spent and does not. The reserve model was added after a live check in which both lite models answered 503 for several minutes while `gemini-3.5-flash` kept answering.
 

@@ -61,8 +61,11 @@ export interface LlmClientOptions {
 /** A busy-server failure: the same model is worth one more try. */
 class TransientError extends Error {}
 
-const DEFAULT_ATTEMPT_TIMEOUT_MS = 10_000;
-const DEFAULT_TOTAL_TIMEOUT_MS = 25_000;
+// A healthy answer takes 1.3 to 4 s (measured on the live service). Under load a
+// model can hang rather than refuse, so each attempt is cut off well before the
+// person gives up, and the offline planner answers within 15 s at worst.
+const DEFAULT_ATTEMPT_TIMEOUT_MS = 8_000;
+const DEFAULT_TOTAL_TIMEOUT_MS = 15_000;
 const DEFAULT_RETRY_DELAY_MS = 400;
 const MAX_TRANSIENT_RETRIES = 1;
 
