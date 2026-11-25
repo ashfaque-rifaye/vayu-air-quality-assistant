@@ -80,116 +80,142 @@ export function peakWindows(hourly: readonly number[], threshold = UNHEALTHY_PM2
  * Every item carries a why, so the routine is explainable rather than a list of
  * orders.
  */
-export function buildRoutine(
-  profile: Pick<
-    Profile,
-    "commuteMode" | "commuteTime" | "outdoorActivity" | "outdoorTime" | "home" | "members"
-  > & { home: Profile["home"] },
-  air: AirQuality,
-): RoutineItem[] {
-  const hourly = air.hourly;
-  const items: { time: string; title: string; why: string; category: MeasureCategory }[] = [];
-  const dayAverage = air.averagePm25;
-  const unhealthy = peakWindows(hourly, UNHEALTHY_PM25);
-  const clean = cleanestWindow(hourly);
+type RoutineProfile = Pick<
+  Profile,
+  "commuteMode" | "commuteTime" | "outdoorActivity" | "outdoorTime" | "home" | "members"
+>;
 
-  items.push({
+interface Suggestion {
+  time: string;
+  title: string;
+  why: string;
+  category: MeasureCategory;
+}
+
+/** What the routine steps read: the forecast and its cleanest stretch. */
+interface Day {
+  hourly: readonly number[];
+  average: number;
+  clean: ReturnType<typeof cleanestWindow>;
+}
+
+const pmAt = (day: Day, hour: number) => day.hourly[hour] ?? day.average;
+
+function checkTheAir(day: Day): Suggestion {
+  return {
     time: "07:00",
     title: "Check today's air before anyone goes out",
-    why: `The daily mean is about ${Math.round(dayAverage)} µg/m³ (AQI ${pm25ToAqi(dayAverage)}), so plan the day around the peaks.`,
+    why: `The daily mean is about ${Math.round(day.average)} µg/m³ (AQI ${pm25ToAqi(day.average)}), so plan the day around the peaks.`,
     category: "monitoring",
-  });
+  };
+}
 
-  if (isSafeToVentilate(hourly)) {
-    items.push({
-      time: hourLabel(clean.start),
-      title: `Air out the home ${hourLabel(clean.start)}-${hourLabel(clean.end)}`,
-      why: `This is the cleanest stretch today (about ${Math.round(clean.average)} µg/m³). Ventilate now, then close up.`,
-      category: "ventilation",
-    });
-  } else {
-    items.push({
+/** Air out in the cleanest stretch, or keep the windows shut when there is none. */
+function ventilation(day: Day): Suggestion {
+  const { clean } = day;
+  if (!isSafeToVentilate(day.hourly)) {
+    return {
       time: "09:00",
       title: "Keep windows shut today",
       why: "Outdoor air never clears to a safe level today, so opening up lets smog in.",
       category: "ventilation",
-    });
+    };
   }
-
-  // Commute: shift it toward cleaner air, and mask up if it falls in a peak.
-  if (profile.commuteMode !== "none") {
-    const commuteHour = hourOf(profile.commuteTime);
-    const commutePm = hourly[commuteHour] ?? dayAverage;
-    if (commutePm >= UNHEALTHY_PM25) {
-      items.push({
-        time: hourLabel(commuteHour),
-        title: "Wear a fitted N95 on the commute",
-        why: `Air at ${hourLabel(commuteHour)} is about ${Math.round(commutePm)} µg/m³. A sealed N95 cuts most of what you breathe in.`,
-        category: "masks",
-      });
-    }
-  }
-
-  // Outdoor exercise: move it to the cleanest window, or indoors on a bad day.
-  if (profile.outdoorActivity !== "none") {
-    const exerciseHour = hourOf(profile.outdoorTime);
-    const exercisePm = hourly[exerciseHour] ?? dayAverage;
-    if (exercisePm >= UNHEALTHY_PM25 && clean.average >= UNHEALTHY_PM25) {
-      items.push({
-        time: hourLabel(exerciseHour),
-        title: "Train indoors today",
-        why: "Every hour outdoors is unhealthy today, and hard breathing multiplies the dose. Keep the workout inside.",
-        category: "exercise",
-      });
-    } else if (exercisePm > clean.average + 15) {
-      items.push({
-        time: hourLabel(clean.start),
-        title: `Move exercise to ${hourLabel(clean.start)}`,
-        why: `Your usual ${hourLabel(exerciseHour)} slot is about ${Math.round(exercisePm)} µg/m³ versus ${Math.round(clean.average)} in the clean window.`,
-        category: "exercise",
-      });
-    }
-  }
-
-  // Purifier through the worst air and overnight for the bedroom.
-  if (unhealthy.length > 0) {
-    items.push({
-      time: "21:00",
-      title: profile.home.hasPurifier
-        ? "Run the bedroom purifier overnight"
-        : "Filter the bedroom air overnight",
-      why: "The evening peak and the overnight inversion are the longest high-exposure stretch, and it is when the household sleeps.",
-      category: "purifier",
-    });
-  }
-
-  // Cooking on a dirty fuel vents particles straight into the home.
-  if (profile.home.cookingFuel === "wood" || profile.home.cookingFuel === "kerosene") {
-    items.push({
-      time: "19:00",
-      title: "Vent the kitchen hard while cooking",
-      why: `A ${profile.home.cookingFuel} stove adds more PM2.5 indoors than the smog outside. Extract it and keep the door shut to the rest of the home.`,
-      category: "cooking",
-    });
-  }
-
-  // Close up before the evening inversion.
-  items.push({
-    time: "18:00",
-    title: "Close windows before the evening peak",
-    why: "PM2.5 climbs sharply from early evening as the air cools and traps pollution near the ground.",
+  return {
+    time: hourLabel(clean.start),
+    title: `Air out the home ${hourLabel(clean.start)}-${hourLabel(clean.end)}`,
+    why: `This is the cleanest stretch today (about ${Math.round(clean.average)} µg/m³). Ventilate now, then close up.`,
     category: "ventilation",
-  });
+  };
+}
 
-  return items
-    .map((item, index): RoutineItem => ({
-      id: `routine-${index + 1}`,
-      time: item.time,
-      title: item.title,
-      why: item.why,
-      category: item.category,
-      source: "auto",
-    }))
+/** Mask up when the commute falls in unhealthy air. */
+function commuteMask(day: Day, profile: RoutineProfile): Suggestion | null {
+  if (profile.commuteMode === "none") return null;
+  const hour = hourOf(profile.commuteTime);
+  const pm = pmAt(day, hour);
+  if (pm < UNHEALTHY_PM25) return null;
+  return {
+    time: hourLabel(hour),
+    title: "Wear a fitted N95 on the commute",
+    why: `Air at ${hourLabel(hour)} is about ${Math.round(pm)} µg/m³. A sealed N95 cuts most of what you breathe in.`,
+    category: "masks",
+  };
+}
+
+/** Move exercise to the cleanest window, or indoors when no hour is healthy. */
+function exerciseTiming(day: Day, profile: RoutineProfile): Suggestion | null {
+  if (profile.outdoorActivity === "none") return null;
+  const { clean } = day;
+  const hour = hourOf(profile.outdoorTime);
+  const pm = pmAt(day, hour);
+  if (pm >= UNHEALTHY_PM25 && clean.average >= UNHEALTHY_PM25) {
+    return {
+      time: hourLabel(hour),
+      title: "Train indoors today",
+      why: "Every hour outdoors is unhealthy today, and hard breathing multiplies the dose. Keep the workout inside.",
+      category: "exercise",
+    };
+  }
+  if (pm <= clean.average + 15) return null;
+  return {
+    time: hourLabel(clean.start),
+    title: `Move exercise to ${hourLabel(clean.start)}`,
+    why: `Your usual ${hourLabel(hour)} slot is about ${Math.round(pm)} µg/m³ versus ${Math.round(clean.average)} in the clean window.`,
+    category: "exercise",
+  };
+}
+
+/** Filter the bedroom through the evening peak and the overnight inversion. */
+function bedroomPurifier(day: Day, profile: RoutineProfile): Suggestion | null {
+  if (peakWindows(day.hourly, UNHEALTHY_PM25).length === 0) return null;
+  return {
+    time: "21:00",
+    title: profile.home.hasPurifier
+      ? "Run the bedroom purifier overnight"
+      : "Filter the bedroom air overnight",
+    why: "The evening peak and the overnight inversion are the longest high-exposure stretch, and it is when the household sleeps.",
+    category: "purifier",
+  };
+}
+
+/** A dirty cooking fuel vents particles straight into the home. */
+function kitchenVenting(profile: RoutineProfile): Suggestion | null {
+  const fuel = profile.home.cookingFuel;
+  if (fuel !== "wood" && fuel !== "kerosene") return null;
+  return {
+    time: "19:00",
+    title: "Vent the kitchen hard while cooking",
+    why: `A ${fuel} stove adds more PM2.5 indoors than the smog outside. Extract it and keep the door shut to the rest of the home.`,
+    category: "cooking",
+  };
+}
+
+const CLOSE_UP: Suggestion = {
+  time: "18:00",
+  title: "Close windows before the evening peak",
+  why: "PM2.5 climbs sharply from early evening as the air cools and traps pollution near the ground.",
+  category: "ventilation",
+};
+
+export function buildRoutine(profile: RoutineProfile, air: AirQuality): RoutineItem[] {
+  const day: Day = {
+    hourly: air.hourly,
+    average: air.averagePm25,
+    clean: cleanestWindow(air.hourly),
+  };
+  const suggestions = [
+    checkTheAir(day),
+    ventilation(day),
+    commuteMask(day, profile),
+    exerciseTiming(day, profile),
+    bedroomPurifier(day, profile),
+    kitchenVenting(profile),
+    CLOSE_UP,
+  ].filter((item): item is Suggestion => item !== null);
+
+  return suggestions
+    .map((item, index): RoutineItem => ({ id: `routine-${index + 1}`, ...item, source: "auto" }))
     .sort((a, b) => a.time.localeCompare(b.time));
 }
 

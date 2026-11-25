@@ -159,7 +159,7 @@ The Gemini chain is `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gem
 
 | Technique                           | Effect                                                                                                  |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Route and panel code splitting      | 112 kB gzipped entry, with each panel about 2 kB on demand                                              |
+| Route and panel code splitting      | 113 kB gzipped entry, with each panel about 2 kB on demand                                              |
 | CI bundle budget                    | `scripts/check-bundle-size.mjs` fails the build if the budget is exceeded                               |
 | Self-hosted fonts, no CSS framework | Fonts are served from the same origin, and the CSS is 7 kB gzipped after removing every unused selector |
 | LRU + TTL response cache            | A repeated request returns without calling a model                                                      |

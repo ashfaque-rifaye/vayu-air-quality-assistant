@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { ArrowLeft, ShieldCheck, Wind } from "lucide-react";
 import { AnnouncerProvider } from "./lib/announcer";
-import { parseRoute } from "./lib/route";
+import { parseRoute, type Route } from "./lib/route";
 import type { PlanStore } from "./lib/plan-store";
+import type { Plan } from "../shared/schemas";
 import { HomePage } from "./components/HomePage";
 
 // The workspace is most of the UI code, so the first screen does not pay for it.
@@ -13,6 +14,39 @@ const PlanWorkspace = lazy(() =>
 function subscribeToHash(listener: () => void): () => void {
   window.addEventListener("hashchange", listener);
   return () => window.removeEventListener("hashchange", listener);
+}
+
+function PlanNotFound() {
+  return (
+    <div className="empty-state container">
+      <h1>We could not find that plan</h1>
+      <p>Plans are stored in the browser where they were made. It may be in another one.</p>
+      <a className="button button-primary" href="#/">
+        Back to home
+      </a>
+    </div>
+  );
+}
+
+/** What the current route shows: home, a plan, or an explanation when the plan is missing. */
+function Screen({
+  route,
+  plan,
+  plans,
+  store,
+}: {
+  route: Route;
+  plan: Plan | undefined;
+  plans: readonly Plan[];
+  store: PlanStore;
+}) {
+  if (route.name === "home") return <HomePage store={store} plans={plans} />;
+  if (!plan) return <PlanNotFound />;
+  return (
+    <Suspense fallback={<p role="status">Opening your plan…</p>}>
+      <PlanWorkspace plan={plan} tab={route.tab} store={store} />
+    </Suspense>
+  );
 }
 
 export function App({ store }: { store: PlanStore }) {
@@ -60,21 +94,7 @@ export function App({ store }: { store: PlanStore }) {
         ) : null}
       </header>
       <main id="main" ref={mainRef} tabIndex={-1} className="site-main">
-        {route.name === "plan" && plan ? (
-          <Suspense fallback={<p role="status">Opening your plan…</p>}>
-            <PlanWorkspace plan={plan} tab={route.tab} store={store} />
-          </Suspense>
-        ) : route.name === "plan" ? (
-          <div className="empty-state container">
-            <h1>We could not find that plan</h1>
-            <p>Plans are stored in the browser where they were made. It may be in another one.</p>
-            <a className="button button-primary" href="#/">
-              Back to home
-            </a>
-          </div>
-        ) : (
-          <HomePage store={store} plans={plans} />
-        )}
+        <Screen route={route} plan={plan} plans={plans} store={store} />
       </main>
       <footer className="site-footer">
         <p>

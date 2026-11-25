@@ -55,7 +55,18 @@ export interface AqiBand {
   advice: string;
 }
 
-const AQI_BANDS: readonly (AqiBand & { maxAqi: number })[] = [
+type BandRow = AqiBand & { maxAqi: number };
+
+/** The open-ended top band, so every AQI, however high, has a band. */
+const HAZARDOUS: BandRow = {
+  maxAqi: Infinity,
+  level: "hazardous",
+  label: "Hazardous",
+  advice:
+    "Emergency conditions. Stay indoors with filtered air and wear a fitted respirator outside.",
+};
+
+const AQI_BANDS: readonly BandRow[] = [
   {
     maxAqi: 50,
     level: "good",
@@ -87,17 +98,11 @@ const AQI_BANDS: readonly (AqiBand & { maxAqi: number })[] = [
     label: "Very unhealthy",
     advice: "Health alert. Avoid outdoor exertion, keep windows shut and filter indoor air.",
   },
-  {
-    maxAqi: Infinity,
-    level: "hazardous",
-    label: "Hazardous",
-    advice:
-      "Emergency conditions. Stay indoors with filtered air and wear a fitted respirator outside.",
-  },
+  HAZARDOUS,
 ];
 
 export function aqiBand(aqi: number): AqiBand {
-  const band = AQI_BANDS.find((b) => aqi <= b.maxAqi) ?? AQI_BANDS[AQI_BANDS.length - 1]!;
+  const band = AQI_BANDS.find((b) => aqi <= b.maxAqi) ?? HAZARDOUS;
   return { level: band.level, label: band.label, advice: band.advice };
 }
 

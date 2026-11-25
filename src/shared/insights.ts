@@ -96,98 +96,127 @@ function hourPm(plan: Pick<Plan, "air">, time: string): number {
 }
 
 const OPEN_AIR_COMMUTES = new Set(["walk", "cycle", "motorbike", "bus"]);
+const BURNS_FUEL = new Set(["wood", "kerosene"]);
+const UNHEALTHY_LEVELS = new Set(["unhealthy", "very-unhealthy", "hazardous"]);
 
+/** What every risk rule reads, worked out once per plan. */
+interface RiskContext {
+  plan: Plan;
+  adopted: ReadonlySet<string>;
+  exposure: ReturnType<typeof planExposure>;
+  dayLabel: string;
+  unhealthyDay: boolean;
+}
+
+/** One rule: the risk it finds, or null when the plan is safe on that front. */
+type RiskRule = (context: RiskContext) => Risk | null;
+
+const exerciseInPeak: RiskRule = ({ plan: { profile, air }, adopted }) => {
+  const pm = hourPm({ air }, profile.outdoorTime);
+  if (profile.outdoorActivity === "none" || adopted.has("exercise") || pm < UNHEALTHY_PM25) {
+    return null;
+  }
+  return {
+    id: "exercise-in-peak",
+    severity: "high",
+    title: "A hard workout is scheduled in the smog peak",
+    why: `Air at ${profile.outdoorTime} is about ${Math.round(pm)} µg/m³, and breathing hard multiplies the dose. Move it indoors or to the clean window.`,
+    tab: "routine",
+  };
+};
+
+const commuteUnmasked: RiskRule = ({ plan: { profile, air }, adopted }) => {
+  const pm = hourPm({ air }, profile.commuteTime);
+  if (!OPEN_AIR_COMMUTES.has(profile.commuteMode) || adopted.has("masks") || pm < UNHEALTHY_PM25) {
+    return null;
+  }
+  return {
+    id: "commute-unmasked",
+    severity: "high",
+    title: "The commute is unmasked in heavy smog",
+    why: `The ${profile.commuteMode} trip at ${profile.commuteTime} is in open air at about ${Math.round(pm)} µg/m³. A fitted N95 removes most of it.`,
+    tab: "measures",
+  };
+};
+
+const vulnerableNoPurifier: RiskRule = ({ plan, adopted, unhealthyDay, dayLabel }) =>
+  hasVulnerableMember(plan) && unhealthyDay && !adopted.has("purifier")
+    ? {
+        id: "vulnerable-no-purifier",
+        severity: "high",
+        title: "A sensitive member has no clean indoor air",
+        why: `Someone in the home is more at risk, the air is ${dayLabel.toLowerCase()}, and no purifier is running. The bedroom is the place to start.`,
+        tab: "measures",
+      }
+    : null;
+
+const dirtyCooking: RiskRule = ({ plan: { profile }, adopted }) =>
+  BURNS_FUEL.has(profile.home.cookingFuel) && !adopted.has("cooking")
+    ? {
+        id: "dirty-cooking",
+        severity: "high",
+        title: "Cooking burns fuel indoors",
+        why: `A ${profile.home.cookingFuel} stove often adds more PM2.5 indoors than the smog outside. Clean fuel and extraction is the biggest indoor win here.`,
+        tab: "measures",
+      }
+    : null;
+
+const dirtyHeating: RiskRule = ({ plan: { profile }, adopted }) =>
+  BURNS_FUEL.has(profile.home.heating) && !adopted.has("heating")
+    ? {
+        id: "dirty-heating",
+        severity: "high",
+        title: "Heating burns fuel indoors",
+        why: `A ${profile.home.heating} heater is a heavy indoor particle source through the winter. Electric or sealed-flue heat avoids it.`,
+        tab: "measures",
+      }
+    : null;
+
+const leakyHome: RiskRule = ({ plan: { profile }, adopted, unhealthyDay }) =>
+  profile.home.ventilation === "leaky" && !adopted.has("sealing") && unhealthyDay
+    ? {
+        id: "leaky-home",
+        severity: "medium",
+        title: "Smog leaks straight into the home",
+        why: "A leaky home lets most of the outdoor haze in, so a purifier can never get ahead of the room. Sealing comes first.",
+        tab: "measures",
+      }
+    : null;
+
+const exposureHigh: RiskRule = ({ exposure }) =>
+  exposure.timesTarget >= 3 && exposure.reductionAchieved < exposure.reductionPossible * 0.25
+    ? {
+        id: "exposure-high",
+        severity: "medium",
+        title: `Today's exposure is about ${exposure.timesTarget}x the safe target`,
+        why: "Most of the protection on offer is not in place yet. Adopting the top measures closes the gap fast.",
+        tab: "exposure",
+      }
+    : null;
+
+const RISK_RULES: readonly RiskRule[] = [
+  exerciseInPeak,
+  commuteUnmasked,
+  vulnerableNoPurifier,
+  dirtyCooking,
+  dirtyHeating,
+  leakyHome,
+  exposureHigh,
+];
+
+/** Every risk the plan carries today, high severity first. */
 export function detectRisks(plan: Plan): Risk[] {
-  const risks: Risk[] = [];
-  const adopted = adoptedCategories(plan);
-  const exposure = planExposure(plan);
   const dayBand = pm25Band(plan.air.averagePm25);
-  const unhealthyDay =
-    dayBand.level === "unhealthy" ||
-    dayBand.level === "very-unhealthy" ||
-    dayBand.level === "hazardous";
-  const { profile } = plan;
-
-  if (
-    profile.outdoorActivity !== "none" &&
-    !adopted.has("exercise") &&
-    hourPm(plan, profile.outdoorTime) >= UNHEALTHY_PM25
-  ) {
-    risks.push({
-      id: "exercise-in-peak",
-      severity: "high",
-      title: "A hard workout is scheduled in the smog peak",
-      why: `Air at ${profile.outdoorTime} is about ${Math.round(hourPm(plan, profile.outdoorTime))} µg/m³, and breathing hard multiplies the dose. Move it indoors or to the clean window.`,
-      tab: "routine",
-    });
-  }
-
-  if (
-    profile.commuteMode !== "none" &&
-    OPEN_AIR_COMMUTES.has(profile.commuteMode) &&
-    !adopted.has("masks") &&
-    hourPm(plan, profile.commuteTime) >= UNHEALTHY_PM25
-  ) {
-    risks.push({
-      id: "commute-unmasked",
-      severity: "high",
-      title: "The commute is unmasked in heavy smog",
-      why: `The ${profile.commuteMode} trip at ${profile.commuteTime} is in open air at about ${Math.round(hourPm(plan, profile.commuteTime))} µg/m³. A fitted N95 removes most of it.`,
-      tab: "measures",
-    });
-  }
-
-  if (hasVulnerableMember(plan) && unhealthyDay && !adopted.has("purifier")) {
-    risks.push({
-      id: "vulnerable-no-purifier",
-      severity: "high",
-      title: "A sensitive member has no clean indoor air",
-      why: `Someone in the home is more at risk, the air is ${dayBand.label.toLowerCase()}, and no purifier is running. The bedroom is the place to start.`,
-      tab: "measures",
-    });
-  }
-
-  if (["wood", "kerosene"].includes(profile.home.cookingFuel) && !adopted.has("cooking")) {
-    risks.push({
-      id: "dirty-cooking",
-      severity: "high",
-      title: "Cooking burns fuel indoors",
-      why: `A ${profile.home.cookingFuel} stove often adds more PM2.5 indoors than the smog outside. Clean fuel and extraction is the biggest indoor win here.`,
-      tab: "measures",
-    });
-  }
-
-  if (["wood", "kerosene"].includes(profile.home.heating) && !adopted.has("heating")) {
-    risks.push({
-      id: "dirty-heating",
-      severity: "high",
-      title: "Heating burns fuel indoors",
-      why: `A ${profile.home.heating} heater is a heavy indoor particle source through the winter. Electric or sealed-flue heat avoids it.`,
-      tab: "measures",
-    });
-  }
-
-  if (profile.home.ventilation === "leaky" && !adopted.has("sealing") && unhealthyDay) {
-    risks.push({
-      id: "leaky-home",
-      severity: "medium",
-      title: "Smog leaks straight into the home",
-      why: "A leaky home lets most of the outdoor haze in, so a purifier can never get ahead of the room. Sealing comes first.",
-      tab: "measures",
-    });
-  }
-
-  if (exposure.timesTarget >= 3 && exposure.reductionAchieved < exposure.reductionPossible * 0.25) {
-    risks.push({
-      id: "exposure-high",
-      severity: "medium",
-      title: `Today's exposure is about ${exposure.timesTarget}x the safe target`,
-      why: "Most of the protection on offer is not in place yet. Adopting the top measures closes the gap fast.",
-      tab: "exposure",
-    });
-  }
-
-  return risks.sort((a, b) => Number(b.severity === "high") - Number(a.severity === "high"));
+  const context: RiskContext = {
+    plan,
+    adopted: adoptedCategories(plan),
+    exposure: planExposure(plan),
+    dayLabel: dayBand.label,
+    unhealthyDay: UNHEALTHY_LEVELS.has(dayBand.level),
+  };
+  return RISK_RULES.flatMap((rule) => rule(context) ?? []).sort(
+    (a, b) => Number(b.severity === "high") - Number(a.severity === "high"),
+  );
 }
 
 export interface NextMeasure {

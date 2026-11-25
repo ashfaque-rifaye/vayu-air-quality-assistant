@@ -250,7 +250,8 @@ export interface SwapTemplate {
 }
 
 /** Curated sustainable alternatives, each with its direct impact spelled out. */
-export const SWAP_BANK: readonly SwapTemplate[] = [
+/** Never empty: the offline planner always has a swap to offer. */
+export const SWAP_BANK: readonly [SwapTemplate, ...SwapTemplate[]] = [
   {
     title: "Take the metro or carpool on smog days",
     description:

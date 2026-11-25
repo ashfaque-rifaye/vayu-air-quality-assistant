@@ -20,7 +20,7 @@ npm run test:e2e   # browser tests (first run: npx playwright install chromium)
 
 ## Architectural rules
 
-ESLint enforces the first two, and review enforces the rest.
+ESLint enforces rules 1, 2 and 10, and review enforces the rest.
 
 1. **`src/shared` stays pure.** No I/O, framework, or clock. Pass "today" in.
 2. **Client code never imports server code.** That boundary is what keeps keys out of the browser.
@@ -31,6 +31,7 @@ ESLint enforces the first two, and review enforces the rest.
 7. **The model does not do arithmetic.** AQI, doses and impacts come from `aqi.ts`, `exposure.ts` and `routine.ts`. The model explains and tailors them, and never states one.
 8. **Ground the model against what the code knows.** If a rule can be checked in code (is it safe to ventilate, does this measure exist, is this a duplicate), check it in `ground()` rather than trusting the prompt.
 9. **Nothing about a person leaves the browser unless a feature needs it.** `buildPlanContext` is that boundary: member groups, never names.
+10. **Keep functions small.** ESLint fails the build on cyclomatic complexity above 10, nesting deeper than 3, more than 4 parameters, functions over 80 lines or files over 500, nested ternaries, `any` and non-null assertions. When a function grows, split it into named steps or a table of rules, as `detectRisks`, `buildRoutine` and `planReducer` do.
 
 ## Adding an AI feature
 

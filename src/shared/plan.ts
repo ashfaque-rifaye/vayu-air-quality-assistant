@@ -200,7 +200,7 @@ function addRoutineItem(
   return {
     ...plan,
     seq,
-    routine: [...plan.routine, item].sort((a, b) => a.time.localeCompare(b.time)),
+    routine: [...plan.routine, item].sort(byTime),
   };
 }
 
@@ -235,177 +235,167 @@ function applyProposal(plan: Plan, proposal: PlanProposal): Plan {
   }
 }
 
+/** Replace the one item with this id; every other item is returned as is. */
+function updateById<T extends { id: string }>(
+  items: readonly T[],
+  id: string,
+  update: (item: T) => T,
+): T[] {
+  return items.map((item) => (item.id === id ? update(item) : item));
+}
+
+function byTime(a: { time: string }, b: { time: string }): number {
+  return a.time.localeCompare(b.time);
+}
+
+function updateProfile(plan: Plan, patch: Partial<Profile>, today: string): Plan {
+  const profile: Profile = { ...plan.profile, ...patch };
+  const cityChanged = Boolean(patch.city) && patch.city !== plan.profile.city;
+  return { ...plan, profile, air: cityChanged ? rebuildAir(profile, plan.air, today) : plan.air };
+}
+
+function setAirAverage(plan: Plan, amount: number, today: string): Plan {
+  if (!Number.isFinite(amount) || amount < 0) return plan;
+  const air = buildAirQuality({
+    city: plan.profile.city,
+    averagePm25: amount,
+    source: "manual",
+    station: plan.air.station,
+    observedAt: observedAt(today),
+  });
+  return { ...plan, air };
+}
+
+function addMember(plan: Plan, label: string, group: Member["group"]): Plan {
+  const trimmed = label.trim();
+  if (!trimmed) return plan;
+  const { id, seq } = nextId(plan, "member");
+  const members = [...plan.profile.members, { id, label: trimmed, group }];
+  return { ...plan, seq, profile: { ...plan.profile, members } };
+}
+
+function setMembers(plan: Plan, members: Member[]): Plan {
+  return { ...plan, profile: { ...plan.profile, members } };
+}
+
+function setSwaps(plan: Plan, swaps: readonly Omit<Swap, "id" | "saved">[]): Plan {
+  const saved = plan.swaps.filter((swap) => swap.saved);
+  const fresh = swaps.map((swap, index): Swap => ({
+    ...swap,
+    id: `swap-x${plan.seq + index + 1}`,
+    saved: false,
+  }));
+  return { ...plan, seq: plan.seq + swaps.length, swaps: [...saved, ...fresh] };
+}
+
+function appendChat(plan: Plan, message: Omit<ChatMessage, "id">): Plan {
+  const { id, seq } = nextId(plan, "msg");
+  const chat = [...plan.chat, { ...message, id }].slice(-MAX_CHAT_MESSAGES);
+  return { ...plan, seq, chat };
+}
+
+function applyChatProposal(plan: Plan, messageId: string, index: number): Plan {
+  const proposal = plan.chat.find((m) => m.id === messageId)?.proposals?.[index];
+  if (!proposal) return plan;
+  return withoutProposal(applyProposal(plan, proposal), messageId, index);
+}
+
+/** Layer the AI's tailoring over the plan, skipping anything it already covers. */
+function applyPersonalization(plan: Plan, payload: PersonalizationPayload): Plan {
+  const withMeasures = payload.measures.reduce(
+    (next, measure) =>
+      duplicatesExisting(next, measure) ? next : addMeasure(next, { ...measure, source: "ai" }),
+    plan,
+  );
+  const withRoutine = payload.routine.reduce(
+    (next, item) => addRoutineItem(next, { ...item, source: "ai" }),
+    withMeasures,
+  );
+  const { summary, reasoning, source } = payload;
+  return { ...withRoutine, personalization: { summary, reasoning, source } };
+}
+
+type ActionOf<T extends PlanAction["type"]> = Extract<PlanAction, { type: T }>;
+type Handlers = {
+  [T in PlanAction["type"]]: (plan: Plan, action: ActionOf<T>, today: string) => Plan;
+};
+
+/** One small, pure handler per action. Adding an action without a handler fails to compile. */
+const HANDLERS: Handlers = {
+  updateProfile: (plan, { patch }, today) => updateProfile(plan, patch, today),
+  setAirAverage: (plan, { amount }, today) => setAirAverage(plan, amount, today),
+  resetAir: (plan, _action, today) => ({
+    ...plan,
+    air: buildAirQuality({
+      city: plan.profile.city,
+      source: "model",
+      observedAt: observedAt(today),
+    }),
+  }),
+  regenerateRoutine: (plan) => {
+    const kept = plan.routine.filter((item) => item.source === "you");
+    return { ...plan, routine: [...buildRoutine(plan.profile, plan.air), ...kept].sort(byTime) };
+  },
+  addMember: (plan, { label, group }) => addMember(plan, label, group),
+  removeMember: (plan, { id }) =>
+    plan.profile.members.length <= 1
+      ? plan
+      : setMembers(
+          plan,
+          plan.profile.members.filter((m) => m.id !== id),
+        ),
+  updateMember: (plan, { id, patch }) =>
+    setMembers(
+      plan,
+      updateById(plan.profile.members, id, (m) => ({ ...m, ...patch })),
+    ),
+  setMeasureStatus: (plan, { id, status }) => ({
+    ...plan,
+    measures: updateById(plan.measures, id, (m) => ({ ...m, status })),
+  }),
+  addMeasure: (plan, action) => addMeasure(plan, action),
+  removeMeasure: (plan, { id }) => ({
+    ...plan,
+    measures: plan.measures.filter((m) => m.id !== id),
+  }),
+  updateMeasure: (plan, { id, patch }) => ({
+    ...plan,
+    measures: updateById(plan.measures, id, (m) => ({ ...m, ...patch })),
+  }),
+  setMeasureGuide: (plan, { id, guide }) => ({
+    ...plan,
+    measures: updateById(plan.measures, id, (m) => ({ ...m, guide })),
+  }),
+  toggleMeasureCheck: (plan, { measureId, checkId }) => ({
+    ...plan,
+    measures: updateById(plan.measures, measureId, (m) => ({
+      ...m,
+      checks: updateById(m.checks, checkId, (c) => ({ ...c, done: !c.done })),
+    })),
+  }),
+  setReview: (plan, { review }) => ({ ...plan, review }),
+  setSwaps: (plan, { swaps }) => setSwaps(plan, swaps),
+  toggleSwapSaved: (plan, { id }) => ({
+    ...plan,
+    swaps: updateById(plan.swaps, id, (swap) => ({ ...swap, saved: !swap.saved })),
+  }),
+  setDaySheet: (plan, { items }) => ({ ...plan, daySheet: [...items] }),
+  addRoutineItem: (plan, action) => addRoutineItem(plan, action),
+  removeRoutineItem: (plan, { id }) => ({
+    ...plan,
+    routine: plan.routine.filter((item) => item.id !== id),
+  }),
+  appendChat: (plan, { message }) => appendChat(plan, message),
+  applyProposal: (plan, { messageId, index }) => applyChatProposal(plan, messageId, index),
+  dismissProposal: (plan, { messageId, index }) => withoutProposal(plan, messageId, index),
+  applyPersonalization: (plan, { payload }) => applyPersonalization(plan, payload),
+};
+
 /**
  * The single place a plan changes. Invalid actions return the plan unchanged, so
  * a stale or hallucinated id is a no-op rather than a corrupted plan.
  */
 export function planReducer(plan: Plan, action: PlanAction, today: string): Plan {
-  switch (action.type) {
-    case "updateProfile": {
-      const profile: Profile = { ...plan.profile, ...action.patch };
-      const air =
-        action.patch.city && action.patch.city !== plan.profile.city
-          ? rebuildAir(profile, plan.air, today)
-          : plan.air;
-      return { ...plan, profile, air };
-    }
-    case "setAirAverage": {
-      if (!Number.isFinite(action.amount) || action.amount < 0) return plan;
-      return {
-        ...plan,
-        air: buildAirQuality({
-          city: plan.profile.city,
-          averagePm25: action.amount,
-          source: "manual",
-          station: plan.air.station,
-          observedAt: observedAt(today),
-        }),
-      };
-    }
-    case "resetAir":
-      return {
-        ...plan,
-        air: buildAirQuality({
-          city: plan.profile.city,
-          source: "model",
-          observedAt: observedAt(today),
-        }),
-      };
-    case "regenerateRoutine": {
-      const kept = plan.routine.filter((item) => item.source === "you");
-      const auto = buildRoutine(plan.profile, plan.air);
-      return { ...plan, routine: [...auto, ...kept].sort((a, b) => a.time.localeCompare(b.time)) };
-    }
-    case "addMember": {
-      const label = action.label.trim();
-      if (!label) return plan;
-      const { id, seq } = nextId(plan, "member");
-      return {
-        ...plan,
-        seq,
-        profile: {
-          ...plan.profile,
-          members: [...plan.profile.members, { id, label, group: action.group }],
-        },
-      };
-    }
-    case "removeMember": {
-      if (plan.profile.members.length <= 1) return plan;
-      return {
-        ...plan,
-        profile: {
-          ...plan.profile,
-          members: plan.profile.members.filter((m) => m.id !== action.id),
-        },
-      };
-    }
-    case "updateMember":
-      return {
-        ...plan,
-        profile: {
-          ...plan.profile,
-          members: plan.profile.members.map((m) =>
-            m.id === action.id ? { ...m, ...action.patch } : m,
-          ),
-        },
-      };
-    case "setMeasureStatus":
-      return {
-        ...plan,
-        measures: plan.measures.map((m) =>
-          m.id === action.id ? { ...m, status: action.status } : m,
-        ),
-      };
-    case "addMeasure":
-      return addMeasure(plan, action);
-    case "removeMeasure":
-      return { ...plan, measures: plan.measures.filter((m) => m.id !== action.id) };
-    case "updateMeasure":
-      return {
-        ...plan,
-        measures: plan.measures.map((m) => (m.id === action.id ? { ...m, ...action.patch } : m)),
-      };
-    case "setMeasureGuide":
-      return {
-        ...plan,
-        measures: plan.measures.map((m) =>
-          m.id === action.id ? { ...m, guide: action.guide } : m,
-        ),
-      };
-    case "toggleMeasureCheck":
-      return {
-        ...plan,
-        measures: plan.measures.map((m) =>
-          m.id === action.measureId
-            ? {
-                ...m,
-                checks: m.checks.map((c) =>
-                  c.id === action.checkId ? { ...c, done: !c.done } : c,
-                ),
-              }
-            : m,
-        ),
-      };
-    case "setReview":
-      return { ...plan, review: action.review };
-    case "setSwaps": {
-      const saved = plan.swaps.filter((swap) => swap.saved);
-      let seq = plan.seq;
-      const fresh = action.swaps.map((swap): Swap => {
-        seq += 1;
-        return { ...swap, id: `swap-x${seq}`, saved: false };
-      });
-      return { ...plan, seq, swaps: [...saved, ...fresh] };
-    }
-    case "toggleSwapSaved":
-      return {
-        ...plan,
-        swaps: plan.swaps.map((swap) =>
-          swap.id === action.id ? { ...swap, saved: !swap.saved } : swap,
-        ),
-      };
-    case "setDaySheet":
-      return { ...plan, daySheet: [...action.items] };
-    case "addRoutineItem":
-      return addRoutineItem(plan, action);
-    case "removeRoutineItem":
-      return { ...plan, routine: plan.routine.filter((item) => item.id !== action.id) };
-    case "appendChat": {
-      const { id, seq } = nextId(plan, "msg");
-      const chat = [...plan.chat, { ...action.message, id }];
-      return { ...plan, seq, chat: chat.slice(-MAX_CHAT_MESSAGES) };
-    }
-    case "applyProposal": {
-      const message = plan.chat.find((m) => m.id === action.messageId);
-      const proposal = message?.proposals?.[action.index];
-      if (!proposal) return plan;
-      return withoutProposal(applyProposal(plan, proposal), action.messageId, action.index);
-    }
-    case "dismissProposal":
-      return withoutProposal(plan, action.messageId, action.index);
-    case "applyPersonalization": {
-      const { payload } = action;
-      let next = plan;
-      for (const measure of payload.measures) {
-        if (duplicatesExisting(next, measure)) continue;
-        next = addMeasure(next, {
-          label: measure.label,
-          category: measure.category,
-          why: measure.why,
-          source: "ai",
-        });
-      }
-      for (const item of payload.routine) {
-        next = addRoutineItem(next, { ...item, source: "ai" });
-      }
-      return {
-        ...next,
-        personalization: {
-          summary: payload.summary,
-          reasoning: payload.reasoning,
-          source: payload.source,
-        },
-      };
-    }
-  }
+  const handle = HANDLERS[action.type] as (plan: Plan, action: PlanAction, today: string) => Plan;
+  return handle(plan, action, today);
 }

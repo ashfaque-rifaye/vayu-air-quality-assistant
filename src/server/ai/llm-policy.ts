@@ -58,18 +58,21 @@ export function isTransientStatus(status: number): boolean {
   return status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-/** Ordered, de-duplicated model chain for a provider. */
+/** Each provider's chain: the environment variable that overrides a step, and its default. */
+const CHAINS: Record<LlmProvider, readonly [keyof LlmEnv, string][]> = {
+  gemini: [
+    ["GEMINI_MODEL", DEFAULT_GEMINI_MODEL],
+    ["GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_FALLBACK_MODEL],
+    ["GEMINI_RESERVE_MODEL", DEFAULT_GEMINI_RESERVE_MODEL],
+  ],
+  fireworks: [
+    ["FIREWORKS_MODEL", DEFAULT_FIREWORKS_MODEL],
+    ["FIREWORKS_FALLBACK_MODEL", DEFAULT_FIREWORKS_FALLBACK_MODEL],
+  ],
+};
+
+/** Ordered, de-duplicated model chain for a provider. A blank override keeps the default. */
 export function modelChain(provider: LlmProvider, env: LlmEnv): string[] {
-  const chain =
-    provider === "gemini"
-      ? [
-          env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL,
-          env.GEMINI_FALLBACK_MODEL?.trim() || DEFAULT_GEMINI_FALLBACK_MODEL,
-          env.GEMINI_RESERVE_MODEL?.trim() || DEFAULT_GEMINI_RESERVE_MODEL,
-        ]
-      : [
-          env.FIREWORKS_MODEL?.trim() || DEFAULT_FIREWORKS_MODEL,
-          env.FIREWORKS_FALLBACK_MODEL?.trim() || DEFAULT_FIREWORKS_FALLBACK_MODEL,
-        ];
+  const chain = CHAINS[provider].map(([key, fallback]) => env[key]?.trim() || fallback);
   return [...new Set(chain)];
 }

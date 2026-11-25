@@ -75,75 +75,97 @@ export function householdSize(text: string): number | undefined {
   return n >= 1 && n <= 12 ? n : undefined;
 }
 
+const ACTIVITY_RULES: readonly [RegExp, "intense" | "moderate" | "light"][] = [
+  [/\b(run|running|jog|jogging|marathon|sprint)\w*/i, "intense"],
+  [/\b(gym|workout|sport|football|cricket|cycling)\w*/i, "moderate"],
+  [/\b(walk|stroll|yoga outside)\w*/i, "light"],
+];
+
+const NEAR_ROAD = /\b(main road|highway|busy road|roadside|heavy traffic|near the road)\b/i;
+const MENTIONS_PURIFIER = /\b(purifier|hepa)\b/i;
+const DENIES_PURIFIER = /\b(no|without|not|don't|do not|never)\b[^.]{0,25}\b(purifier|hepa)\b/i;
+const MAX_MEMBERS = 12;
+
+/** The value paired with the first pattern that matches, if any. */
+function firstMatch<T>(rules: readonly (readonly [RegExp, T, ...unknown[]])[], text: string) {
+  return rules.find(([pattern]) => pattern.test(text))?.[1];
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
 /** The first clock time in the text ("8am", "7:30 pm", "18:00") as 24-hour HH:MM. */
 export function parseClockTime(text: string): string | undefined {
-  const match = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b/i.exec(text);
-  if (!match) return undefined;
-  let hours = Number(match[1] ?? match[4]);
-  const minutes = Number(match[2] ?? match[5] ?? 0);
-  const meridiem = match[3]?.toLowerCase();
-  if (meridiem) {
+  const twelveHour = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i.exec(text);
+  if (twelveHour) {
+    const hours = Number(twelveHour[1]);
+    const minutes = Number(twelveHour[2] ?? 0);
     if (hours < 1 || hours > 12 || minutes > 59) return undefined;
-    hours = (hours % 12) + (meridiem === "pm" ? 12 : 0);
+    const pm = twelveHour[3]?.toLowerCase() === "pm";
+    return `${pad2((hours % 12) + (pm ? 12 : 0))}:${pad2(minutes)}`;
   }
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  const twentyFourHour = /\b([01]?\d|2[0-3]):([0-5]\d)\b/.exec(text);
+  return twentyFourHour ? `${pad2(Number(twentyFourHour[1]))}:${twentyFourHour[2]}` : undefined;
+}
+
+/** The people described, then healthy adults up to a stated size ("a family of four"). */
+function readMembers(text: string): { label: string; group: SensitivityGroup }[] {
+  const described = MEMBER_RULES.filter(([pattern]) => pattern.test(text)).map(
+    ([, group, label]) => ({ label, group }),
+  );
+  const size = Math.min(householdSize(text) ?? 0, MAX_MEMBERS);
+  const padding = Array.from({ length: Math.max(0, size - described.length) }, () => ({
+    label: "Adult",
+    group: "healthy" as const,
+  }));
+  return [...described, ...padding].slice(0, MAX_MEMBERS);
+}
+
+type DraftHome = NonNullable<AiOutput<"interpret">["profile"]["home"]>;
+
+function readHome(text: string): DraftHome | undefined {
+  const home: DraftHome = {};
+  const fuel = firstMatch(FUEL_RULES, text);
+  if (fuel) home.cookingFuel = fuel;
+  if (MENTIONS_PURIFIER.test(text) && !DENIES_PURIFIER.test(text)) home.hasPurifier = true;
+  if (NEAR_ROAD.test(text)) home.nearRoad = true;
+  return Object.keys(home).length > 0 ? home : undefined;
+}
+
+function questionsFor(profile: AiOutput<"interpret">["profile"]): string[] {
+  const questions: string[] = [];
+  if (!profile.city) questions.push("Which city are you in? Winter smog varies a lot by place.");
+  if (!profile.members) {
+    questions.push(
+      "Who lives with you, and is anyone a child, older, pregnant or living with a lung or heart condition?",
+    );
+  }
+  if (!profile.home?.cookingFuel) questions.push("How do you cook and heat your home?");
+  return questions.slice(0, 3);
 }
 
 export function interpretFallback(input: AiParsedInput<"interpret">): AiOutput<"interpret"> {
   const { text } = input;
-  const profile: AiOutput<"interpret">["profile"] = { notes: text.slice(0, 600) };
-
+  const members = readMembers(text);
+  const home = readHome(text);
   const city = CITY.exec(text)?.[1];
-  if (city) profile.city = city;
+  const commuteMode = firstMatch(COMMUTE_RULES, text);
+  const commuteTime = commuteMode ? parseClockTime(text) : undefined;
+  const outdoorActivity = firstMatch(ACTIVITY_RULES, text);
 
-  const members: { label: string; group: SensitivityGroup }[] = MEMBER_RULES.filter(([pattern]) =>
-    pattern.test(text),
-  ).map(([, group, label]) => ({ label, group }));
-  // "A family of four": the people described, then healthy adults up to that size.
-  const size = householdSize(text);
-  while (size && members.length < Math.min(size, 12))
-    members.push({ label: "Adult", group: "healthy" });
-  if (members.length > 0) profile.members = members.slice(0, 12);
-
-  const fuel = FUEL_RULES.find(([pattern]) => pattern.test(text))?.[1];
-  const mentionsPurifier = /\b(purifier|hepa)\b/i.test(text);
-  const deniesPurifier =
-    /\b(no|without|not|don't|do not|never)\b[^.]{0,25}\b(purifier|hepa)\b/i.test(text);
-  const purifier = mentionsPurifier && !deniesPurifier;
-  const nearRoad = /\b(main road|highway|busy road|roadside|heavy traffic|near the road)\b/i.test(
-    text,
-  );
-  if (fuel || purifier || nearRoad) {
-    profile.home = {
-      ...(fuel ? { cookingFuel: fuel } : {}),
-      ...(purifier ? { hasPurifier: true } : {}),
-      ...(nearRoad ? { nearRoad: true } : {}),
-    };
-  }
-
-  const commute = COMMUTE_RULES.find(([pattern]) => pattern.test(text))?.[1];
-  if (commute) profile.commuteMode = commute;
-  const leaves = commute ? parseClockTime(text) : undefined;
-  if (leaves) profile.commuteTime = leaves;
-
-  if (/\b(run|running|jog|jogging|marathon|sprint)\w*/i.test(text))
-    profile.outdoorActivity = "intense";
-  else if (/\b(gym|workout|sport|football|cricket|cycling)\w*/i.test(text))
-    profile.outdoorActivity = "moderate";
-  else if (/\b(walk|stroll|yoga outside)\w*/i.test(text)) profile.outdoorActivity = "light";
-
-  const questions: string[] = [];
-  if (!city) questions.push("Which city are you in? Winter smog varies a lot by place.");
-  if (members.length === 0)
-    questions.push(
-      "Who lives with you, and is anyone a child, older, pregnant or living with a lung or heart condition?",
-    );
-  if (!fuel) questions.push("How do you cook and heat your home?");
+  const profile: AiOutput<"interpret">["profile"] = {
+    notes: text.slice(0, 600),
+    ...(city ? { city } : {}),
+    ...(members.length > 0 ? { members } : {}),
+    ...(home ? { home } : {}),
+    ...(commuteMode ? { commuteMode } : {}),
+    ...(commuteTime ? { commuteTime } : {}),
+    ...(outdoorActivity ? { outdoorActivity } : {}),
+  };
 
   return {
     profile,
     assumptions: [],
-    questions: questions.slice(0, 3),
+    questions: questionsFor(profile),
     reasoning: "Read with simple pattern matching because the AI model was unavailable.",
   };
 }
@@ -262,7 +284,7 @@ export function swapsFallback(input: AiParsedInput<"swaps">): AiOutput<"swaps"> 
 }
 
 function defaultSwap(): AiOutput<"swaps">["swaps"][number] {
-  const first = SWAP_BANK[0]!;
+  const [first] = SWAP_BANK;
   return {
     title: first.title,
     description: first.description,

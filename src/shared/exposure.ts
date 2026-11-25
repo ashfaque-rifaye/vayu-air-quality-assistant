@@ -129,155 +129,174 @@ function round(dose: number): number {
   return Math.round(dose);
 }
 
+type SegmentProfile = Pick<
+  Profile,
+  "commuteMode" | "commuteMinutes" | "commuteTime" | "outdoorActivity" | "outdoorTime"
+>;
+
+const COOKING_HOURS = 2;
+const SLEEP_HOURS = 8;
+const WAKING_HOURS = 16;
+
+/** How the home and the adopted measures shape the air the household breathes. */
+interface Environment {
+  hourly: readonly number[];
+  /** Outdoor air near a busy road carries more particles. */
+  roadFactor: number;
+  /** A fitted N95 removes about 90% of what reaches the face. */
+  maskFactor: number;
+  cookingFuel: CookingFuel;
+  heatingSource: number;
+  /** Indoor PM2.5 for a given outdoor level, extra indoor source and purifier use. */
+  indoor: (outdoor: number, extraSource: number, purifierHere?: boolean) => number;
+}
+
+function purifierEffect(home: Home, adopted: Adopted): number {
+  if (!adopted.has("purifier")) return 0;
+  return home.purifierCadr && home.purifierCadr > 0
+    ? purifierReduction(home.purifierCadr, home.roomSqm)
+    : DEFAULT_PURIFIER_REDUCTION;
+}
+
+function environment(home: Home, air: AirQuality, adopted: Adopted): Environment {
+  const ventilation = adopted.has("sealing") ? tighten(home.ventilation) : home.ventilation;
+  const indoorBaseline = adopted.has("ventilation") ? VENTILATED_INDOOR_BASELINE : INDOOR_BASELINE;
+  const plantsBonus = adopted.has("plants") ? 1 : 0;
+  const reduction = purifierEffect(home, adopted);
+  return {
+    hourly: air.hourly,
+    roadFactor: home.nearRoad ? 1.2 : 1,
+    maskFactor: adopted.has("masks") ? 0.1 : 1,
+    cookingFuel: adopted.has("cooking") ? "induction" : home.cookingFuel,
+    heatingSource: adopted.has("heating") ? 0 : HEATING_SOURCE[home.heating],
+    indoor: (outdoor, extraSource, purifierHere = true) =>
+      indoorPm25(outdoor, {
+        ventilation,
+        purifierReduction: purifierHere ? reduction : 0,
+        indoorSource: Math.max(0, indoorBaseline - plantsBonus + extraSource),
+      }),
+  };
+}
+
+/** Average outdoor PM2.5 over a stretch of whole hours starting at a clock time. */
+function outdoorOver(env: Environment, time: string | number, hours: number): number {
+  const start = typeof time === "number" ? time : hourOf(time);
+  return averageOverHours(env.hourly, start, Math.max(1, Math.round(hours)));
+}
+
+function commuteHoursOf(profile: SegmentProfile): number {
+  return profile.commuteMode === "none" ? 0 : Math.min(8, (profile.commuteMinutes * 2) / 60);
+}
+
+function sleepSegment(env: Environment): ExposureSegment {
+  const outdoor = outdoorOver(env, 23, SLEEP_HOURS);
+  return segment({
+    id: "sleep",
+    label: "Sleep",
+    place: "indoor",
+    hours: SLEEP_HOURS,
+    outdoorPm25: outdoor,
+    effectivePm25: env.indoor(outdoor, env.heatingSource),
+    breathing: BREATHING.rest,
+  });
+}
+
+/** Two indoor hours carrying the stove's own particles, with the purifier usually off. */
+function cookingSegment(env: Environment): ExposureSegment {
+  const outdoor = outdoorOver(env, 19, COOKING_HOURS);
+  const source = env.heatingSource + COOKING_SOURCE[env.cookingFuel];
+  return segment({
+    id: "cooking",
+    label: "Cooking",
+    place: "indoor",
+    hours: COOKING_HOURS,
+    outdoorPm25: outdoor,
+    effectivePm25: env.indoor(outdoor, source, false),
+    breathing: BREATHING.light,
+  });
+}
+
+/** Ambient air, lightly filtered by the vehicle, or not at all on foot or two wheels. */
+function commuteSegment(env: Environment, profile: SegmentProfile, adopted: Adopted) {
+  const hours = commuteHoursOf(profile);
+  if (hours <= 0) return null;
+  const mode = COMMUTE_PROFILE[profile.commuteMode];
+  const outdoor = outdoorOver(env, profile.commuteTime, hours);
+  const cleaner = adopted.has("commute") ? 0.55 : 1;
+  return segment({
+    id: "commute",
+    label: "Commute",
+    place: "outdoor",
+    hours,
+    outdoorPm25: outdoor,
+    effectivePm25: outdoor * mode.enclosure * env.roadFactor * env.maskFactor * cleaner,
+    breathing: mode.breathing,
+  });
+}
+
+/** The biggest dose on a smoggy day, through hard breathing, unless moved indoors. */
+function activitySegment(env: Environment, profile: SegmentProfile, adopted: Adopted) {
+  const activity = ACTIVITY_PROFILE[profile.outdoorActivity];
+  if (activity.hours <= 0) return null;
+  const outdoor = outdoorOver(env, profile.outdoorTime, activity.hours);
+  const movedIndoors = adopted.has("exercise");
+  return segment({
+    id: "outdoor",
+    label: movedIndoors ? "Exercise (indoors)" : "Outdoor activity",
+    place: movedIndoors ? "indoor" : "outdoor",
+    hours: activity.hours,
+    outdoorPm25: outdoor,
+    effectivePm25: movedIndoors
+      ? env.indoor(outdoor, 0)
+      : outdoor * env.roadFactor * env.maskFactor,
+    breathing: activity.breathing,
+  });
+}
+
+/** Everything else awake, at home. */
+function homeSegment(env: Environment, profile: SegmentProfile) {
+  const outdoorHours = ACTIVITY_PROFILE[profile.outdoorActivity].hours;
+  const hours = WAKING_HOURS - commuteHoursOf(profile) - outdoorHours - COOKING_HOURS;
+  if (hours <= 0) return null;
+  const outdoor = outdoorOver(env, 8, 12);
+  return segment({
+    id: "home",
+    label: "At home (awake)",
+    place: "indoor",
+    hours: round1(hours),
+    outdoorPm25: outdoor,
+    effectivePm25: env.indoor(outdoor, env.heatingSource),
+    breathing: BREATHING.light,
+  });
+}
+
 /** Build the day's exposure segments for a given set of adopted measures. */
 export function computeSegments(
-  profile: Pick<
-    Profile,
-    "commuteMode" | "commuteMinutes" | "commuteTime" | "outdoorActivity" | "outdoorTime"
-  >,
+  profile: SegmentProfile,
   home: Home,
   air: AirQuality,
   adopted: Adopted,
 ): ExposureSegment[] {
-  const hourly = air.hourly;
-  const roadFactor = home.nearRoad ? 1.2 : 1;
-  const maskFactor = adopted.has("masks") ? 0.1 : 1;
-  const ventilation = adopted.has("sealing") ? tighten(home.ventilation) : home.ventilation;
-  const indoorBaseline = adopted.has("ventilation") ? VENTILATED_INDOOR_BASELINE : INDOOR_BASELINE;
-  const plantsBonus = adopted.has("plants") ? 1 : 0;
-  const purifierOn = adopted.has("purifier");
-  const reduction = purifierOn
-    ? home.purifierCadr && home.purifierCadr > 0
-      ? purifierReduction(home.purifierCadr, home.roomSqm)
-      : DEFAULT_PURIFIER_REDUCTION
-    : 0;
-
-  const indoor = (outdoor: number, extraSource: number, purifierHere = true): number =>
-    indoorPm25(outdoor, {
-      ventilation,
-      purifierReduction: purifierHere ? reduction : 0,
-      indoorSource: Math.max(0, indoorBaseline - plantsBonus + extraSource),
-    });
-
-  const cookingFuel: CookingFuel = adopted.has("cooking") ? "induction" : home.cookingFuel;
-  const heatingSource = adopted.has("heating") ? 0 : HEATING_SOURCE[home.heating];
-
-  const commuteHours =
-    profile.commuteMode === "none" ? 0 : Math.min(8, (profile.commuteMinutes * 2) / 60);
-  const activity = ACTIVITY_PROFILE[profile.outdoorActivity];
-  const outdoorHours = activity.hours;
-  const cookingHours = 2;
-  const wakingHome = Math.max(0, 16 - commuteHours - outdoorHours - cookingHours);
-
-  const segments: ExposureSegment[] = [];
-
-  // Sleep: eight hours indoors overnight.
-  {
-    const outdoor = averageOverHours(hourly, 23, 8);
-    const effective = indoor(outdoor, heatingSource);
-    segments.push(seg("sleep", "Sleep", "indoor", 8, outdoor, effective, BREATHING.rest));
-  }
-
-  // Cooking: two indoor hours carrying the stove's own particles.
-  {
-    const outdoor = averageOverHours(hourly, 19, cookingHours);
-    const effective = indoor(outdoor, heatingSource + COOKING_SOURCE[cookingFuel], false);
-    segments.push(
-      seg("cooking", "Cooking", "indoor", cookingHours, outdoor, effective, BREATHING.light),
-    );
-  }
-
-  // Commute: ambient air, lightly filtered by the vehicle.
-  if (commuteHours > 0) {
-    const mode = COMMUTE_PROFILE[profile.commuteMode];
-    const outdoor = averageOverHours(
-      hourly,
-      hourOf(profile.commuteTime),
-      Math.max(1, Math.round(commuteHours)),
-    );
-    const cleaner = adopted.has("commute") ? 0.55 : 1;
-    const effective = outdoor * mode.enclosure * roadFactor * maskFactor * cleaner;
-    segments.push(
-      seg("commute", "Commute", "outdoor", commuteHours, outdoor, effective, mode.breathing),
-    );
-  }
-
-  // Outdoor activity: the single biggest dose on a smoggy day, through hard breathing.
-  if (outdoorHours > 0) {
-    const outdoor = averageOverHours(
-      hourly,
-      hourOf(profile.outdoorTime),
-      Math.max(1, Math.round(outdoorHours)),
-    );
-    if (adopted.has("exercise")) {
-      // Moved indoors: same effort, filtered air.
-      const effective = indoor(outdoor, 0);
-      segments.push(
-        seg(
-          "outdoor",
-          "Exercise (indoors)",
-          "indoor",
-          outdoorHours,
-          outdoor,
-          effective,
-          activity.breathing,
-        ),
-      );
-    } else {
-      const effective = outdoor * roadFactor * maskFactor;
-      segments.push(
-        seg(
-          "outdoor",
-          "Outdoor activity",
-          "outdoor",
-          outdoorHours,
-          outdoor,
-          effective,
-          activity.breathing,
-        ),
-      );
-    }
-  }
-
-  // Everything else awake, at home.
-  if (wakingHome > 0) {
-    const outdoor = averageOverHours(hourly, 8, 12);
-    const effective = indoor(outdoor, heatingSource);
-    segments.push(
-      seg(
-        "home",
-        "At home (awake)",
-        "indoor",
-        round1(wakingHome),
-        outdoor,
-        effective,
-        BREATHING.light,
-      ),
-    );
-  }
-
-  return segments;
+  const env = environment(home, air, adopted);
+  return [
+    sleepSegment(env),
+    cookingSegment(env),
+    commuteSegment(env, profile, adopted),
+    activitySegment(env, profile, adopted),
+    homeSegment(env, profile),
+  ].filter((segment): segment is ExposureSegment => segment !== null);
 }
 
-function seg(
-  id: ExposureSegment["id"],
-  label: string,
-  place: ExposureSegment["place"],
-  hours: number,
-  outdoorPm25: number,
-  effectivePm25: number,
-  breathing: number,
+function segment(
+  parts: Omit<ExposureSegment, "dose" | "effectivePm25"> & { effectivePm25: number },
 ): ExposureSegment {
-  const eff = Math.max(0, effectivePm25);
+  const effective = Math.max(0, parts.effectivePm25);
   return {
-    id,
-    label,
-    place,
-    hours: round1(hours),
-    outdoorPm25: round1(outdoorPm25),
-    effectivePm25: round1(eff),
-    breathing,
-    dose: round(eff * hours * breathing),
+    ...parts,
+    hours: round1(parts.hours),
+    outdoorPm25: round1(parts.outdoorPm25),
+    effectivePm25: round1(effective),
+    dose: round(effective * parts.hours * parts.breathing),
   };
 }
 

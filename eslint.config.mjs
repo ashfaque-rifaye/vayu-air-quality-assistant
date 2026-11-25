@@ -19,6 +19,22 @@ export default tseslint.config(
     },
   },
   {
+    // Maintainability limits, enforced so functions stay small enough to read in
+    // one go. Tests are exempt: a long, flat scenario is clearer than a split one.
+    files: ["src/**/*.{ts,tsx}", "api/**/*.ts"],
+    ignores: ["**/*.test.{ts,tsx}", "src/test/**"],
+    rules: {
+      complexity: ["error", 10],
+      "max-depth": ["error", 3],
+      "max-params": ["error", 4],
+      "max-lines-per-function": ["error", { max: 80, skipBlankLines: true, skipComments: true }],
+      "max-lines": ["error", { max: 500, skipBlankLines: true, skipComments: true }],
+      "no-nested-ternary": "error",
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-non-null-assertion": "error",
+    },
+  },
+  {
     files: ["src/client/**/*.tsx"],
     plugins: { "react-hooks": reactHooks, "jsx-a11y": jsxA11y },
     rules: {

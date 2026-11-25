@@ -5,8 +5,9 @@
 import type { ReactNode } from "react";
 import { Cpu, ShieldCheck, Sparkles, type LucideIcon } from "lucide-react";
 import { textDirection } from "../../shared/languages";
-import type { AiEnvelopeMeta } from "../../shared/contracts";
+import type { AiEnvelopeMeta, AiFeatureName } from "../../shared/contracts";
 import type { AiSource, Language } from "../../shared/schemas";
+import type { AiState } from "../lib/use-ai";
 
 const SOURCE_LABEL: Record<AiSource, string> = {
   gemini: "AI · Gemini",
@@ -84,6 +85,42 @@ export function Field({
         </p>
       ) : null}
     </div>
+  );
+}
+
+/** A labelled select over a fixed set of values, each shown by its human label. */
+export function SelectField<T extends string>({
+  id,
+  label,
+  value,
+  options,
+  labels,
+  onChange,
+  hint,
+}: {
+  id: string;
+  label: string;
+  value: T;
+  options: readonly T[];
+  labels: Readonly<Record<T, string>>;
+  onChange: (value: T) => void;
+  hint?: string;
+}) {
+  return (
+    <Field id={id} label={label} {...(hint ? { hint } : {})}>
+      <select
+        id={id}
+        value={value}
+        onChange={(event) => onChange(event.target.value as T)}
+        {...describedBy(id, { hint: Boolean(hint) })}
+      >
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {labels[option]}
+          </option>
+        ))}
+      </select>
+    </Field>
   );
 }
 
@@ -189,6 +226,32 @@ export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () 
           Try again
         </button>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The state of one AI request, in a polite live region: a spinner while it runs,
+ * the error (with a retry when one is offered), and who answered once it has.
+ */
+export function AiStatus<F extends AiFeatureName>({
+  state,
+  loading,
+  onRetry,
+  showSource = true,
+}: {
+  state: AiState<F>;
+  loading: string;
+  onRetry?: () => void;
+  showSource?: boolean;
+}) {
+  return (
+    <div aria-live="polite">
+      {state.status === "loading" ? <Loading>{loading}</Loading> : null}
+      {state.status === "error" ? (
+        <ErrorNote message={state.message} {...(onRetry ? { onRetry } : {})} />
+      ) : null}
+      {showSource && state.status === "success" ? <AiBadge meta={state.envelope} /> : null}
     </div>
   );
 }

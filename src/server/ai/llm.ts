@@ -163,34 +163,62 @@ export function createLlmClient(env: LlmEnv, options: LlmClientOptions = {}): Ll
     return text;
   }
 
+  /** One run through the chain: shared deadline, request, parser and failure log. */
+  interface Run<T> {
+    request: LlmRequest;
+    parse: (text: string) => T;
+    deadline: AbortSignal;
+    failures: string[];
+  }
+
+  /**
+   * Try one model, with one short retry if it answers "busy". The result is the
+   * answer, or where the chain should go next.
+   */
+  async function tryModel<T>(
+    run: Run<T>,
+    provider: LlmProvider,
+    model: string,
+  ): Promise<LlmResult<T> | "next-model" | "next-provider"> {
+    for (let retry = 0; retry <= MAX_TRANSIENT_RETRIES && !run.deadline.aborted; retry++) {
+      try {
+        const signal = AbortSignal.any([run.deadline, AbortSignal.timeout(attemptTimeoutMs)]);
+        const text = await attempt(provider, model, run.request, signal);
+        return { value: run.parse(text), provider, model };
+      } catch (error) {
+        run.failures.push(`${provider}/${model}: ${describeFailure(error)}`);
+        if (error instanceof ProviderFatalError) return "next-provider";
+        if (!(error instanceof TransientError) || retry === MAX_TRANSIENT_RETRIES) break;
+        // A busy model often answers a moment later; jitter spreads out retries.
+        await sleep(retryDelayMs * (1 + Math.random() / 2));
+      }
+    }
+    return "next-model";
+  }
+
+  /** Walk one provider's model chain; null means move on to the next provider. */
+  async function tryProvider<T>(run: Run<T>, provider: LlmProvider): Promise<LlmResult<T> | null> {
+    for (const model of modelChain(provider, env)) {
+      if (run.deadline.aborted) return null;
+      const outcome = await tryModel(run, provider, model);
+      if (outcome === "next-provider") return null;
+      if (outcome !== "next-model") return outcome;
+    }
+    return null;
+  }
+
   return {
     configured: providers.length > 0,
 
     async complete(request, parse) {
       if (providers.length === 0) throw new LlmUnavailableError("no provider configured");
-
-      const deadline = AbortSignal.timeout(totalTimeoutMs);
-      const failures: string[] = [];
-
-      providers: for (const provider of providers) {
-        for (const model of modelChain(provider, env)) {
-          for (let retry = 0; retry <= MAX_TRANSIENT_RETRIES; retry++) {
-            if (deadline.aborted) break providers;
-            try {
-              const signal = AbortSignal.any([deadline, AbortSignal.timeout(attemptTimeoutMs)]);
-              const text = await attempt(provider, model, request, signal);
-              return { value: parse(text), provider, model };
-            } catch (error) {
-              failures.push(`${provider}/${model}: ${describeFailure(error)}`);
-              if (error instanceof ProviderFatalError) continue providers;
-              if (!(error instanceof TransientError) || retry === MAX_TRANSIENT_RETRIES) break;
-              // A busy model often answers a moment later; jitter spreads out retries.
-              await sleep(retryDelayMs * (1 + Math.random() / 2));
-            }
-          }
-        }
+      const run = { request, parse, deadline: AbortSignal.timeout(totalTimeoutMs), failures: [] };
+      for (const provider of providers) {
+        if (run.deadline.aborted) break;
+        const result = await tryProvider(run, provider);
+        if (result) return result;
       }
-      throw new LlmUnavailableError(failures.join(" | ") || "deadline exceeded");
+      throw new LlmUnavailableError(run.failures.join(" | ") || "deadline exceeded");
     },
   };
 }

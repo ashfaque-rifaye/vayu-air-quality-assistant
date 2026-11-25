@@ -43,6 +43,20 @@ export interface PanelProps {
   dispatch: (action: PlanAction) => void;
 }
 
+/**
+ * The ARIA tabs keyboard pattern: arrows move and wrap, Home and End jump to the
+ * ends. Returns -1 for any other key.
+ */
+export function tabIndexForKey(key: string, index: number, count: number): number {
+  const moves: Record<string, number> = {
+    ArrowRight: (index + 1) % count,
+    ArrowLeft: (index - 1 + count) % count,
+    Home: 0,
+    End: count - 1,
+  };
+  return moves[key] ?? -1;
+}
+
 function renderDetailPanel(tab: Exclude<PlanTab, "overview">, props: PanelProps) {
   switch (tab) {
     case "exposure":
@@ -56,6 +70,104 @@ function renderDetailPanel(tab: Exclude<PlanTab, "overview">, props: PanelProps)
     case "assistant":
       return <AssistantPanel {...props} />;
   }
+}
+
+/** The household, today's air and the protection score, at a glance. */
+function PlanHero({ plan }: { plan: Plan }) {
+  const { profile, air } = plan;
+  const band = pm25Band(air.averagePm25);
+  const { score } = computeProtection(plan);
+  const people = profile.members.length;
+  return (
+    <div className="plan-hero">
+      <div className="container plan-hero-inner">
+        <div>
+          <p className="hero-eyebrow">
+            <MapPin aria-hidden="true" size={16} />
+            {profile.city}
+          </p>
+          <h1>{profile.household}</h1>
+          <ul className="plan-facts">
+            <li>
+              <AqiPill aqi={pm25ToAqi(air.averagePm25)} level={band.level} label={band.label} />
+            </li>
+            <li>
+              <Users aria-hidden="true" size={16} />
+              {people} {people === 1 ? "person" : "people"}
+            </li>
+          </ul>
+        </div>
+        <div className="plan-hero-score">
+          <ProgressRing value={score} label={`Protection score: ${score} of 100`} />
+          <span>{scoreLabel(score)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** One tab. Only the selected tab is in the tab order; arrows move between them. */
+function TabButton({
+  id,
+  label,
+  selected,
+  register,
+  onSelect,
+  onKeyDown,
+}: {
+  id: PlanTab;
+  label: string;
+  selected: boolean;
+  register: (element: HTMLButtonElement | null) => void;
+  onSelect: () => void;
+  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+}) {
+  const Icon = TAB_ICONS[id];
+  return (
+    <button
+      ref={register}
+      type="button"
+      role="tab"
+      id={`tab-${id}`}
+      aria-selected={selected}
+      aria-controls={`panel-${id}`}
+      tabIndex={selected ? 0 : -1}
+      className="tab"
+      onClick={onSelect}
+      onKeyDown={onKeyDown}
+    >
+      <Icon aria-hidden="true" size={17} />
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Every new plan gets one AI pass that layers household-specific measures and
+ * routine items over the deterministic skeleton. The plan is already usable while
+ * this runs. A re-run supersedes the previous request, and it is cached.
+ */
+function usePersonalization(plan: Plan, dispatch: (action: PlanAction) => void) {
+  const { state, run } = useAi("personalize");
+
+  const retry = useCallback(() => {
+    void run({ profile: profileForAi(plan.profile), air: buildAirContext(plan.air) }).then(
+      (envelope) => {
+        if (!envelope) return;
+        const { summary, reasoning, measures, routine } = envelope.data;
+        dispatch({
+          type: "applyPersonalization",
+          payload: { summary, reasoning, source: envelope.source, measures, routine },
+        });
+      },
+    );
+  }, [plan.profile, plan.air, run, dispatch]);
+
+  useEffect(() => {
+    if (!plan.personalization) retry();
+  }, [plan.personalization, retry]);
+
+  return { state, retry };
 }
 
 export function PlanWorkspace({
@@ -73,113 +185,37 @@ export function PlanWorkspace({
     [store, plan.id],
   );
   const tabRefs = useRef(new Map<PlanTab, HTMLButtonElement>());
-  const { state: personalizeState, run: personalize } = useAi("personalize");
-
-  // Every new plan gets one AI pass that layers household-specific measures and
-  // routine items over the deterministic skeleton. The plan is already usable
-  // while this runs. A re-run supersedes the previous request, and it is cached.
-  const tailorPlan = useCallback(() => {
-    void personalize({ profile: profileForAi(plan.profile), air: buildAirContext(plan.air) }).then(
-      (envelope) => {
-        if (!envelope) return;
-        const { summary, reasoning, measures, routine } = envelope.data;
-        dispatch({
-          type: "applyPersonalization",
-          payload: { summary, reasoning, source: envelope.source, measures, routine },
-        });
-      },
-    );
-  }, [plan.profile, plan.air, personalize, dispatch]);
-
-  useEffect(() => {
-    if (!plan.personalization) tailorPlan();
-  }, [plan.personalization, tailorPlan]);
+  const { state: personalizeState, retry: tailorPlan } = usePersonalization(plan, dispatch);
 
   function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
     const index = PLAN_TABS.findIndex((candidate) => candidate.id === tab);
-    const last = PLAN_TABS.length - 1;
-    const target =
-      event.key === "ArrowRight"
-        ? index === last
-          ? 0
-          : index + 1
-        : event.key === "ArrowLeft"
-          ? index === 0
-            ? last
-            : index - 1
-          : event.key === "Home"
-            ? 0
-            : event.key === "End"
-              ? last
-              : -1;
-    const next = PLAN_TABS[target];
+    const next = PLAN_TABS[tabIndexForKey(event.key, index, PLAN_TABS.length)];
     if (!next) return;
     event.preventDefault();
     navigate(planHref(plan.id, next.id));
     tabRefs.current.get(next.id)?.focus();
   }
 
-  const { profile, air } = plan;
-  const band = pm25Band(air.averagePm25);
-  const protection = computeProtection(plan);
-
   return (
-    <div className="workspace" data-level={band.level}>
-      <div className="plan-hero">
-        <div className="container plan-hero-inner">
-          <div>
-            <p className="hero-eyebrow">
-              <MapPin aria-hidden="true" size={16} />
-              {profile.city}
-            </p>
-            <h1>{profile.household}</h1>
-            <ul className="plan-facts">
-              <li>
-                <AqiPill aqi={pm25ToAqi(air.averagePm25)} level={band.level} label={band.label} />
-              </li>
-              <li>
-                <Users aria-hidden="true" size={16} />
-                {profile.members.length} {profile.members.length === 1 ? "person" : "people"}
-              </li>
-            </ul>
-          </div>
-          <div className="plan-hero-score">
-            <ProgressRing
-              value={protection.score}
-              label={`Protection score: ${protection.score} of 100`}
-            />
-            <span>{scoreLabel(protection.score)}</span>
-          </div>
-        </div>
-      </div>
-
+    <div className="workspace" data-level={pm25Band(plan.air.averagePm25).level}>
+      <PlanHero plan={plan} />
       <div className="tabs-bar no-print">
         <div className="container">
           <div className="tabs" role="tablist" aria-label="Plan sections">
-            {PLAN_TABS.map(({ id, label }) => {
-              const Icon = TAB_ICONS[id];
-              return (
-                <button
-                  key={id}
-                  ref={(element) => {
-                    if (element) tabRefs.current.set(id, element);
-                    else tabRefs.current.delete(id);
-                  }}
-                  type="button"
-                  role="tab"
-                  id={`tab-${id}`}
-                  aria-selected={tab === id}
-                  aria-controls={`panel-${id}`}
-                  tabIndex={tab === id ? 0 : -1}
-                  className="tab"
-                  onClick={() => navigate(planHref(plan.id, id))}
-                  onKeyDown={onTabKeyDown}
-                >
-                  <Icon aria-hidden="true" size={17} />
-                  {label}
-                </button>
-              );
-            })}
+            {PLAN_TABS.map(({ id, label }) => (
+              <TabButton
+                key={id}
+                id={id}
+                label={label}
+                selected={tab === id}
+                register={(element) => {
+                  if (element) tabRefs.current.set(id, element);
+                  else tabRefs.current.delete(id);
+                }}
+                onSelect={() => navigate(planHref(plan.id, id))}
+                onKeyDown={onTabKeyDown}
+              />
+            ))}
           </div>
         </div>
       </div>

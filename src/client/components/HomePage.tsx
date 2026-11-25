@@ -4,7 +4,12 @@ import { pm25Band, pm25ToAqi } from "../../shared/aqi";
 import { computeProtection, scoreLabel } from "../../shared/insights";
 import type { Plan } from "../../shared/schemas";
 import { useAnnounce } from "../lib/announcer";
-import { MAX_IMPORT_BYTES, parsePlanBackup, type PlanStore } from "../lib/plan-store";
+import {
+  MAX_IMPORT_BYTES,
+  parsePlanBackup,
+  type ImportResult,
+  type PlanStore,
+} from "../lib/plan-store";
 import { navigate, planHref } from "../lib/route";
 import { IntakeFlow } from "./IntakeFlow";
 import { AqiPill, ProgressBar } from "./ui";
@@ -82,17 +87,22 @@ function SavedPlanCard({ plan, onRemove }: { plan: Plan; onRemove: () => void })
   );
 }
 
-export function HomePage({ store, plans }: { store: PlanStore; plans: readonly Plan[] }) {
+/** Read an uploaded backup; the file is untrusted, so size and shape are both checked. */
+async function readBackup(file: File): Promise<ImportResult> {
+  if (file.size > MAX_IMPORT_BYTES) {
+    return { ok: false, error: "That file is too large to be a Vayu backup." };
+  }
+  return parsePlanBackup(await file.text());
+}
+
+/** Plans saved in this browser, and importing one from a backup file. */
+function SavedPlans({ store, plans }: { store: PlanStore; plans: readonly Plan[] }) {
   const announce = useAnnounce();
   const fileInput = useRef<HTMLInputElement>(null);
   const [importError, setImportError] = useState("");
 
   async function importBackup(file: File): Promise<void> {
-    if (file.size > MAX_IMPORT_BYTES) {
-      setImportError("That file is too large to be a Vayu backup.");
-      return;
-    }
-    const result = parsePlanBackup(await file.text());
+    const result = await readBackup(file);
     if (!result.ok) {
       setImportError(result.error);
       return;
@@ -104,85 +114,95 @@ export function HomePage({ store, plans }: { store: PlanStore; plans: readonly P
   }
 
   return (
-    <div className="home">
-      <section className="hero" aria-labelledby="hero-title">
-        <div className="container hero-inner">
-          <p className="hero-eyebrow">
-            Winter smog · Urban air pollution · Families &amp; communities
-          </p>
-          <h1 id="hero-title">
-            Can&apos;t clear the air?
-            <br />
-            <em>Clear the plan.</em>
-          </h1>
-          <p className="hero-lead">
-            Tell Vayu about your home and household. You get a low-emission daily routine, indoor
-            air hacks and sustainable swaps made for your city and life, each one showing the exact
-            PM2.5 dose it keeps out of your lungs.
-          </p>
-          <ul className="capabilities">
-            {CAPABILITIES.map(({ icon: Icon, title, text }) => (
-              <li key={title} className="capability">
-                <Icon aria-hidden="true" size={20} />
-                <span>
-                  <strong>{title}</strong>
-                  {text}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </section>
-
-      <div className="container home-body">
-        <IntakeFlow store={store} />
-
-        <section className="saved-plans" aria-labelledby="saved-title">
-          <div className="section-heading">
-            <h2 id="saved-title">Your households</h2>
-            <button type="button" className="button" onClick={() => fileInput.current?.click()}>
-              <Upload aria-hidden="true" size={16} />
-              Import backup
-            </button>
-            <input
-              ref={fileInput}
-              className="sr-only"
-              type="file"
-              accept="application/json,.json"
-              aria-label="Import a Vayu plan backup"
-              tabIndex={-1}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void importBackup(file);
-                event.target.value = "";
+    <section className="saved-plans" aria-labelledby="saved-title">
+      <div className="section-heading">
+        <h2 id="saved-title">Your households</h2>
+        <button type="button" className="button" onClick={() => fileInput.current?.click()}>
+          <Upload aria-hidden="true" size={16} />
+          Import backup
+        </button>
+        <input
+          ref={fileInput}
+          className="sr-only"
+          type="file"
+          accept="application/json,.json"
+          aria-label="Import a Vayu plan backup"
+          tabIndex={-1}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void importBackup(file);
+            event.target.value = "";
+          }}
+        />
+      </div>
+      {importError ? (
+        <p className="callout callout-danger" role="alert">
+          {importError}
+        </p>
+      ) : null}
+      {plans.length === 0 ? (
+        <p className="empty-note">
+          Nothing here yet. Your first plan will appear here, in this browser only.
+        </p>
+      ) : (
+        <ul className="plan-list">
+          {plans.map((plan) => (
+            <SavedPlanCard
+              key={plan.id}
+              plan={plan}
+              onRemove={() => {
+                store.remove(plan.id);
+                announce(`Deleted ${plan.profile.household}`);
               }}
             />
-          </div>
-          {importError ? (
-            <p className="callout callout-danger" role="alert">
-              {importError}
-            </p>
-          ) : null}
-          {plans.length === 0 ? (
-            <p className="empty-note">
-              Nothing here yet. Your first plan will appear here, in this browser only.
-            </p>
-          ) : (
-            <ul className="plan-list">
-              {plans.map((plan) => (
-                <SavedPlanCard
-                  key={plan.id}
-                  plan={plan}
-                  onRemove={() => {
-                    store.remove(plan.id);
-                    announce(`Deleted ${plan.profile.household}`);
-                  }}
-                />
-              ))}
-            </ul>
-          )}
-        </section>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+export function HomePage({ store, plans }: { store: PlanStore; plans: readonly Plan[] }) {
+  return (
+    <div className="home">
+      <Hero />
+      <div className="container home-body">
+        <IntakeFlow store={store} />
+        <SavedPlans store={store} plans={plans} />
       </div>
     </div>
+  );
+}
+
+function Hero() {
+  return (
+    <section className="hero" aria-labelledby="hero-title">
+      <div className="container hero-inner">
+        <p className="hero-eyebrow">
+          Winter smog · Urban air pollution · Families &amp; communities
+        </p>
+        <h1 id="hero-title">
+          Can&apos;t clear the air?
+          <br />
+          <em>Clear the plan.</em>
+        </h1>
+        <p className="hero-lead">
+          Tell Vayu about your home and household. You get a low-emission daily routine, indoor air
+          hacks and sustainable swaps made for your city and life, each one showing the exact PM2.5
+          dose it keeps out of your lungs.
+        </p>
+        <ul className="capabilities">
+          {CAPABILITIES.map(({ icon: Icon, title, text }) => (
+            <li key={title} className="capability">
+              <Icon aria-hidden="true" size={20} />
+              <span>
+                <strong>{title}</strong>
+                {text}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
   );
 }

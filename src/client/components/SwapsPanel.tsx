@@ -5,7 +5,46 @@ import { buildAirContext, profileForAi } from "../../shared/plan-context";
 import { useAnnounce } from "../lib/announcer";
 import { useAi } from "../lib/use-ai";
 import type { PanelProps } from "./PlanWorkspace";
-import { AiBadge, ErrorNote, Field, Loading, Why } from "./ui";
+import type { Language, Swap } from "../../shared/schemas";
+import { AiStatus, Field, Why } from "./ui";
+
+/** One swap, with its impact shown twice: on the planet and on the lungs. */
+function SwapCard({
+  swap,
+  language,
+  onToggleSaved,
+}: {
+  swap: Swap;
+  language: Language;
+  onToggleSaved: () => void;
+}) {
+  const SaveIcon = swap.saved ? BookmarkCheck : Bookmark;
+  return (
+    <li className={swap.saved ? "swap-card saved" : "swap-card"} data-testid="swap-card">
+      <div className="swap-head">
+        <span className="chip-tag">{swap.category}</span>
+        <h4 lang={language}>{swap.title}</h4>
+      </div>
+      <p lang={language}>{swap.description}</p>
+      <p className="swap-impact">
+        <span className="impact-badge impact-co2">
+          <Leaf aria-hidden="true" size={14} /> −{swap.co2eKgPerWeek} kg CO₂e/week
+        </span>
+        <span className="impact-badge impact-dose">
+          <Wind aria-hidden="true" size={14} /> −{formatDose(swap.exposureReductionPerDay)}/day
+        </span>
+      </p>
+      <Why text={swap.why} language={language} />
+      <button
+        type="button"
+        className={swap.saved ? "button button-primary button-small" : "button button-small"}
+        onClick={onToggleSaved}
+      >
+        <SaveIcon aria-hidden="true" size={15} /> {swap.saved ? "Saved" : "Save"}
+      </button>
+    </li>
+  );
+}
 
 export default function SwapsPanel({ plan, dispatch }: PanelProps) {
   const announce = useAnnounce();
@@ -64,60 +103,26 @@ export default function SwapsPanel({ plan, dispatch }: PanelProps) {
           />
         </Field>
 
-        <div aria-live="polite">
-          {state.status === "loading" ? <Loading>Vayu is finding swaps for you…</Loading> : null}
-          {state.status === "error" ? (
-            <ErrorNote message={state.message} onRetry={() => void generate()} />
-          ) : null}
-          {state.status === "success" ? <AiBadge meta={state.envelope} /> : null}
-        </div>
+        <AiStatus
+          state={state}
+          loading="Vayu is finding swaps for you…"
+          onRetry={() => void generate()}
+        />
 
         {plan.swaps.length === 0 ? (
           <p className="empty-note">No swaps yet. Suggest some to get started.</p>
         ) : (
           <ul className="swap-list">
             {plan.swaps.map((swap) => (
-              <li
+              <SwapCard
                 key={swap.id}
-                className={swap.saved ? "swap-card saved" : "swap-card"}
-                data-testid="swap-card"
-              >
-                <div className="swap-head">
-                  <span className="chip-tag">{swap.category}</span>
-                  <h4 lang={language}>{swap.title}</h4>
-                </div>
-                <p lang={language}>{swap.description}</p>
-                <p className="swap-impact">
-                  <span className="impact-badge impact-co2">
-                    <Leaf aria-hidden="true" size={14} /> −{swap.co2eKgPerWeek} kg CO₂e/week
-                  </span>
-                  <span className="impact-badge impact-dose">
-                    <Wind aria-hidden="true" size={14} /> −
-                    {formatDose(swap.exposureReductionPerDay)}/day
-                  </span>
-                </p>
-                <Why text={swap.why} language={language} />
-                <button
-                  type="button"
-                  className={
-                    swap.saved ? "button button-primary button-small" : "button button-small"
-                  }
-                  onClick={() => {
-                    dispatch({ type: "toggleSwapSaved", id: swap.id });
-                    announce(swap.saved ? "Removed from saved" : `Saved: ${swap.title}`);
-                  }}
-                >
-                  {swap.saved ? (
-                    <>
-                      <BookmarkCheck aria-hidden="true" size={15} /> Saved
-                    </>
-                  ) : (
-                    <>
-                      <Bookmark aria-hidden="true" size={15} /> Save
-                    </>
-                  )}
-                </button>
-              </li>
+                swap={swap}
+                language={language}
+                onToggleSaved={() => {
+                  dispatch({ type: "toggleSwapSaved", id: swap.id });
+                  announce(swap.saved ? "Removed from saved" : `Saved: ${swap.title}`);
+                }}
+              />
             ))}
           </ul>
         )}
